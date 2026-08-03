@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+
+    Copyright (c) 2026, Salesforce, Inc.
+    SPDX-License-Identifier: Apache-2.0
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+
+-->
+<!--
+  Integration test configuration for BatchHttpAppender.
+
+  This drives the appender through Log4j2's real plugin-discovery and
+  attribute-binding path (the `packages` scan finds <BatchHttp>, and every
+  attribute below is bound by name), exactly as a customer's log4j2.xml would.
+  The test asserts on the appender built from THIS file, so it can never drift
+  out of sync with the @PluginFactory signature — adding or reordering a factory
+  parameter changes nothing here.
+
+  The intake URL is injected at parse time from a system property the test sets
+  to its randomly-allocated local HTTP server: ${sys:batchhttp.it.url}.
+-->
+<Configuration status="WARN" packages="com.mulesoft.support.batchhttp.log4j2">
+
+    <Appenders>
+        <BatchHttp name="testBatch"
+                   vendor="generic"
+                   url="${sys:batchhttp.it.url}"
+                   maxBatchRecords="50"
+                   maxBatchBytes="1048576"
+                   lingerMillis="100"
+                   queueCapacity="100000"
+                   gzip="true"
+                   includeStackTrace="true"
+                   spillEnabled="false">
+            <PatternLayout pattern="%m"/>
+        </BatchHttp>
+    </Appenders>
+
+    <Loggers>
+        <Logger name="com.mulesoft.support.batchhttp.it" level="INFO" additivity="false">
+            <AppenderRef ref="testBatch"/>
+        </Logger>
+        <!-- Keep everything else silent so the intake only ever sees this test's events. -->
+        <Root level="OFF"/>
+    </Loggers>
+</Configuration>

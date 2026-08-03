@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Custom comment style for license-maven-plugin. Identical to the built-in XML_STYLE
+    except that it skips over an HTML5 `<!DOCTYPE html>` line instead of an `<?xml?>`
+    prolog, so the header lands after the doctype rather than in front of it.
+-->
+<additionalHeaders>
+    <html_doctype_style>
+        <firstLine><![CDATA[<!--]]></firstLine>
+        <beforeEachLine>    </beforeEachLine>
+        <endLine><![CDATA[-->]]></endLine>
+        <skipLine><![CDATA[^<!DOCTYPE.*>$]]></skipLine>
+        <firstLineDetectionPattern><![CDATA[(\s|\t)*<!--.*$]]></firstLineDetectionPattern>
+        <lastLineDetectionPattern><![CDATA[.*-->(\s|\t)*$]]></lastLineDetectionPattern>
+        <allowBlankLines>true</allowBlankLines>
+        <isMultiline>true</isMultiline>
+    </html_doctype_style>
+</additionalHeaders>

@@ -1,0 +1,44 @@
+# ---- Build output ----
+target/
+.mule/
+*.class
+*.jar
+*.war
+*.ear
+
+# ---- Maven ----
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+release.properties
+dependency-reduced-pom.xml
+
+# ---- IDE / editor ----
+.idea/
+*.iml
+.settings/
+.project
+.classpath
+.vscode/
+.cursor/
+.tooling-project
+
+# ---- Local agent / tooling scaffolding ----
+# .cursor/ (above), .claude/ and .fastcontext/ carry no leading slash, so git matches
+# them at every depth -- including the per-app copies under demo/mule/*/.
+.claude/
+# Anchored patterns like this one only match at the repo root, so the leading **/ is
+# what covers the copy under demo/mule/newrelic-batch-http/.
+**/.github/modernize/
+
+# ---- OS ----
+.DS_Store
+velocity.log
+*.log
+*.tmp
+*.bak
+*.swp
+
+# ---- FastContext local tooling ----
+.fastcontext/

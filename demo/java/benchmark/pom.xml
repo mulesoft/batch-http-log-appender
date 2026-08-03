@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.mulesoft.support.batchhttp</groupId>
+        <artifactId>batch-http-appender-parent</artifactId>
+        <version>0.1.3</version>
+        <relativePath>../../../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>batch-http-demo</artifactId>
+    <name>Batch HTTP Appender :: Demo</name>
+    <description>Runnable demo + micro-benchmark against a local mock intake server.</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.mulesoft.support.batchhttp</groupId>
+            <artifactId>batch-http-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.mulesoft.support.batchhttp</groupId>
+            <artifactId>batch-http-log4j2</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.logging.log4j</groupId>
+            <artifactId>log4j-core</artifactId>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>3.6.3</version>
+                <configuration>
+                    <mainClass>com.mulesoft.support.batchhttp.demo.BenchmarkDemo</mainClass>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

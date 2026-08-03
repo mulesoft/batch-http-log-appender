@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Example log4j2.xml showing the batching HTTP appender for each vendor.
+  Drop one of these <BatchHttp> appenders in place of the stock <Http> appender.
+  Secrets are read from environment variables via Log4j2 lookups.
+
+  packages="com.mulesoft.support.batchhttp.log4j2" makes Log4j2 scan our plugin
+  package so the <BatchHttp> element is recognized. It is REQUIRED wherever this
+  library sits on the application classloader rather than the Log4j2 boot classpath
+  — which includes every Mule 4 / CloudHub app. Omit it there and Log4j2 silently
+  ignores the appender.
+-->
+<Configuration status="WARN" packages="com.mulesoft.support.batchhttp.log4j2">
+    <Appenders>
+
+        <!-- Datadog Logs intake (v2). Set DD_API_KEY in the environment.
+             `site` is the log-intake host for the Datadog site your organization lives in (the
+             sink appends /api/v2/logs). Take the value from Datadog's own documentation; leave
+             the attribute off entirely to use the sink's default site. -->
+        <BatchHttp name="datadog"
+                   vendor="datadog"
+                   site="${env:DD_SITE}"
+                   apiKey="${env:DD_API_KEY}"
+                   service="orders-api"
+                   source="java"
+                   maxBatchRecords="500"
+                   maxBatchBytes="1048576"
+                   lingerMillis="1000"
+                   gzip="true"
+                   overflowPolicy="DROP_NEWEST"
+                   maxRetries="3"
+                   flusherThreads="1"
+                   maxMessageBytes="32768"/>
+
+        <!-- Splunk HTTP Event Collector. Set SPLUNK_HEC_TOKEN in the environment. -->
+        <BatchHttp name="splunk"
+                   vendor="splunk"
+                   url="https://hec.example.com:8088"
+                   token="${env:SPLUNK_HEC_TOKEN}"
+                   index="main"
+                   sourcetype="mulesoft:app"
+                   host="prod-app-01"
+                   lingerMillis="1000"
+                   gzip="true"/>
+
+        <!-- New Relic Log API. Set NEW_RELIC_LICENSE_KEY in the environment.
+             `host` is the Log API endpoint for your account's data centre (the sink appends
+             /log/v1). Take the value from New Relic's own documentation; leave the attribute
+             off entirely to use the sink's default. -->
+        <BatchHttp name="newrelic"
+                   vendor="newrelic"
+                   host="${env:NEW_RELIC_LOG_HOST}"
+                   apiKey="${env:NEW_RELIC_LICENSE_KEY}"
+                   lingerMillis="1000"
+                   gzip="true"/>
+
+        <!-- Dynatrace Log Monitoring API v2. `url` is your environment URL — the SaaS or
+             ActiveGate base URL Dynatrace publishes for the environment — and the token needs
+             the logs.ingest scope. Set DT_ENVIRONMENT_URL and DT_API_TOKEN in the environment. -->
+        <BatchHttp name="dynatrace"
+                   vendor="dynatrace"
+                   url="${env:DT_ENVIRONMENT_URL}"
+                   token="${env:DT_API_TOKEN}"
+                   source="mule"
+                   lingerMillis="1000"
+                   gzip="true"/>
+
+        <!-- Any other HTTP intake (Elasticsearch-ish, Loki HTTP, in-house collector). -->
+        <BatchHttp name="generic"
+                   vendor="generic"
+                   url="https://logs.internal.example.com/ingest"
+                   apiKey="${env:INTERNAL_LOG_TOKEN}"
+                   lingerMillis="500"
+                   gzip="true"/>
+
+        <!-- Keep a console appender for local visibility. -->
+        <Console name="console" target="SYSTEM_OUT">
+            <PatternLayout pattern="%d{HH:mm:ss.SSS} [%t] %-5level %logger{36} - %msg%n"/>
+        </Console>
+    </Appenders>
+
+    <Loggers>
+        <Root level="info">
+            <AppenderRef ref="datadog"/>
+            <AppenderRef ref="console"/>
+        </Root>
+    </Loggers>
+</Configuration>

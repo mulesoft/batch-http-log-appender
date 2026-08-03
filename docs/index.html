@@ -1,0 +1,677 @@
+<!DOCTYPE html>
+<!--
+    Copyright (c) 2026, Salesforce, Inc.
+    SPDX-License-Identifier: Apache-2.0
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>batch-http-appender — performance</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d; --ink: #e6edf3;
+    --muted: #8b949e; --accent: #2f81f7; --good: #3fb950; --warn: #d29922;
+    --stock: #db6d28; --batch: #3fb950;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 40px 20px 80px; }
+  h1 { font-size: 30px; margin: 0 0 4px; letter-spacing: -0.02em; }
+  h2 { font-size: 20px; margin: 40px 0 12px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+  h2 .tag { font-size: 13px; color: var(--muted); font-weight: 500; letter-spacing: 0; }
+  h3 { font-size: 15px; margin: 24px 0 8px; }
+  .sub { color: var(--muted); margin: 0 0 24px; }
+  code { background: #21262d; padding: 2px 6px; border-radius: 5px; font-size: 0.88em;
+         font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .meta { display: flex; flex-wrap: wrap; gap: 10px; margin: 20px 0 8px; }
+  .chip {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 999px;
+    padding: 6px 14px; font-size: 13px; color: var(--muted);
+  }
+  .chip b { color: var(--ink); font-weight: 600; }
+
+  .headline { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 24px 0; }
+  @media (max-width: 620px) { .headline { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 20px 22px;
+  }
+  .card .label { color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .card .big { font-size: 34px; font-weight: 700; margin: 6px 0 2px; letter-spacing: -0.02em; }
+  .card .big.batch { color: var(--batch); }
+  .card .big.stock { color: var(--stock); }
+  .card .note { color: var(--muted); font-size: 13px; }
+
+  .verdict {
+    background: linear-gradient(135deg, rgba(63,185,80,0.12), rgba(47,129,247,0.10));
+    border: 1px solid var(--border); border-radius: 12px; padding: 18px 22px; margin: 8px 0 4px;
+  }
+  .verdict b { color: var(--good); font-size: 1.25em; }
+
+  table { width: 100%; border-collapse: collapse; margin: 8px 0 4px; font-size: 14px; }
+  th, td { text-align: right; padding: 9px 12px; border-bottom: 1px solid var(--border); }
+  th:first-child, td:first-child { text-align: left; }
+  thead th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; }
+  tbody tr:hover { background: rgba(255,255,255,0.02); }
+  td.stock { color: var(--stock); }
+  td.batch { color: var(--batch); font-weight: 600; }
+  .win { color: var(--good); font-weight: 600; }
+
+  /* latency bar chart */
+  .bars { margin: 10px 0; }
+  .barrow { display: grid; grid-template-columns: 70px 1fr; align-items: center; gap: 12px; margin: 8px 0; }
+  .barrow .plabel { color: var(--muted); font-size: 13px; text-align: right; }
+  .bartrack { position: relative; height: 30px; }
+  .bar { position: absolute; top: 0; height: 13px; border-radius: 3px; }
+  .bar.stock { top: 0; background: var(--stock); }
+  .bar.batch { top: 16px; background: var(--batch); }
+  .bar span { position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+              font-size: 11px; color: #0d1117; font-weight: 700; white-space: nowrap; }
+  .bar span.out { right: auto; left: calc(100% + 6px); color: var(--ink); }
+  .legend { display: flex; gap: 18px; margin: 6px 0 0 82px; font-size: 12px; color: var(--muted); }
+  .legend i { display: inline-block; width: 11px; height: 11px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+
+  footer { color: var(--muted); font-size: 13px; margin-top: 48px; border-top: 1px solid var(--border); padding-top: 16px; }
+  .disclaim { color: var(--muted); font-size: 13px; background: var(--panel); border: 1px solid var(--border);
+              border-radius: 10px; padding: 14px 18px; margin: 16px 0; }
+  .disclaim b { color: var(--ink); }
+  .disclaim.warn { border-color: rgba(210,153,34,0.5); }
+  .disclaim.warn b { color: var(--warn); }
+
+  /* config code blocks */
+  .cfg { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 8px 0; }
+  @media (max-width: 720px) { .cfg { grid-template-columns: 1fr; } }
+  .cfg h3 { margin: 0 0 8px; font-size: 14px; font-weight: 600; }
+  .cfg h3.stock { color: var(--stock); }
+  .cfg h3.batch { color: var(--batch); }
+  pre { background: #0b0f14; border: 1px solid var(--border); border-radius: 10px;
+        padding: 14px 16px; overflow-x: auto; margin: 0;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; line-height: 1.5; }
+  pre code { background: none; padding: 0; color: #c9d1d9; font-size: inherit; }
+  .diff-add { color: var(--good); }
+  .diff-stock { color: var(--stock); }
+  .cfg-note { color: var(--muted); font-size: 13px; margin: 4px 0 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>batch-http-appender — performance</h1>
+  <p class="sub">Stock Log4j2 <code>HttpAppender</code> vs. the batching HTTP appender (v0.1.3), measured on four Mule apps — a batch/stock pair shipping to <b>Datadog</b> and a second pair shipping to <b>New Relic</b> — on both CloudHub&nbsp;1.0 and CloudHub&nbsp;2.0.</p>
+
+  <div class="meta">
+    <span class="chip"><b>Targets:</b> CloudHub 1.0 &amp; 2.0</span>
+    <span class="chip"><b>Worker:</b> 0.1 vCore</span>
+    <span class="chip"><b>Vendors:</b> Datadog &amp; New Relic</span>
+    <span class="chip"><b>Load:</b> oha, 5 connections, 60 s, plain <code>http</code></span>
+    <span class="chip"><b>Endpoint:</b> <code>/log?count=15</code> — 17 events/request</span>
+    <span class="chip"><b>Warmup:</b> 5 requests, 10 s pause</span>
+    <span class="chip"><b>Pairing:</b> paired-parallel, one vendor per side</span>
+    <span class="chip"><b>Measured:</b> 2026-08-03</span>
+    <span class="chip"><b>appender:</b> v0.1.3</span>
+  </div>
+
+  <div class="verdict">
+    Against its own stock sibling, on the same platform, shipping to the same vendor,
+    the batching appender sustained the full 60 s at
+    <b>16–18× the request throughput on CloudHub 1.0</b> for both vendors and
+    <b>1.2–3.8× on CloudHub 2.0</b> — every one of the eight runs at 100% success.
+    <b>The vendor barely matters; the platform does.</b> That pattern is consistent with a
+    CPU-capped CloudHub 2.0 replica being bottlenecked upstream of the appender, while a
+    CloudHub 1.0 worker leaves headroom a synchronous appender cannot use — offered as the
+    explanation the data fits, not as something these runs measured. The two platforms have
+    different CPU models, so each figure holds within its own plane and the two are not a
+    comparison of each other; see the caveats below.
+    The stock appender's synchronous one-POST-per-event send holds the
+    request thread for the whole round-trip to the intake, so under concurrency its
+    small thread pool saturates and its tail climbs into the multi-second range — p99 between
+    9.5 s and 22 s on three of the four stock runs, the CloudHub 2.0 Datadog run being the
+    exception at 1,105 ms. The batch
+    appender's non-blocking enqueue keeps request latency decoupled from intake latency.
+  </div>
+
+  <div class="headline">
+    <div class="card">
+      <div class="label">CloudHub 1.0 · Datadog</div>
+      <div class="big batch">15.97× <span style="font-size:16px;color:var(--muted)">throughput</span></div>
+      <div class="note">99.54 vs 6.23 req/s &middot; batch vs stock</div>
+    </div>
+    <div class="card">
+      <div class="label">CloudHub 1.0 · New Relic</div>
+      <div class="big batch">18.14× <span style="font-size:16px;color:var(--muted)">throughput</span></div>
+      <div class="note">84.96 vs 4.68 req/s &middot; batch vs stock</div>
+    </div>
+    <div class="card">
+      <div class="label">CloudHub 2.0 · Datadog</div>
+      <div class="big">1.19× <span style="font-size:16px;color:var(--muted)">throughput</span></div>
+      <div class="note">21.27 vs 17.86 req/s &middot; inside the observed run-to-run variance band — directional only</div>
+    </div>
+    <div class="card">
+      <div class="label">CloudHub 2.0 · New Relic</div>
+      <div class="big batch">3.82× <span style="font-size:16px;color:var(--muted)">throughput</span></div>
+      <div class="note">16.44 vs 4.30 req/s &middot; batch vs stock</div>
+    </div>
+  </div>
+
+  <!-- ============================ CloudHub 1.0 ============================ -->
+  <h2>CloudHub 1.0 <span class="tag">— 0.1 vCore worker · <code>/log?count=15</code> · 17 events/request · load windows <code>13:57:34Z–13:58:34Z</code> (batch) and <code>13:59:48Z–14:00:48Z</code> (stock)</span></h2>
+
+  <h3>Datadog intake</h3>
+
+  <div class="headline">
+    <div class="card">
+      <div class="label">Stock HttpAppender</div>
+      <div class="big stock">6.23 <span style="font-size:16px;color:var(--muted)">req/s</span></div>
+      <div class="note">avg 774 ms &middot; p90 2,460 ms &middot; 369 reqs &middot; 100% ok</div>
+    </div>
+    <div class="card">
+      <div class="label">Batch appender (0.1.3)</div>
+      <div class="big batch">99.54 <span style="font-size:16px;color:var(--muted)">req/s</span></div>
+      <div class="note">avg 50 ms &middot; p90 79 ms &middot; 5,968 reqs &middot; 100% ok</div>
+    </div>
+  </div>
+
+  <table>
+    <thead>
+      <tr><th>Metric</th><th>Stock HttpAppender</th><th>Batch appender 0.1.3</th><th>Improvement</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Requests / sec</td><td class="stock">6.23</td><td class="batch">99.54</td><td class="win">15.97×</td></tr>
+      <tr><td>Total requests (60 s)</td><td class="stock">369</td><td class="batch">5,968</td><td class="win">16.2×</td></tr>
+      <tr><td>Success rate</td><td class="stock">100%</td><td class="batch">100%</td><td>—</td></tr>
+      <tr><td>Average latency</td><td class="stock">774 ms</td><td class="batch">50 ms</td><td class="win">15.5× lower</td></tr>
+      <tr><td>p50</td><td class="stock">115 ms</td><td class="batch">35 ms</td><td class="win">3.3×</td></tr>
+      <tr><td>p75</td><td class="stock">185 ms</td><td class="batch">50 ms</td><td class="win">3.7×</td></tr>
+      <tr><td>p90</td><td class="stock">2,460 ms</td><td class="batch">79 ms</td><td class="win">31×</td></tr>
+      <tr><td>p95</td><td class="stock">4,793 ms</td><td class="batch">119 ms</td><td class="win">40×</td></tr>
+      <tr><td>p99</td><td class="stock">9,492 ms</td><td class="batch">235 ms</td><td class="win">40×</td></tr>
+      <tr><td>Fastest</td><td class="stock">28 ms</td><td class="batch">14 ms</td><td>—</td></tr>
+      <tr><td>Slowest</td><td class="stock">11,571 ms</td><td class="batch">4,387 ms</td><td class="win">2.6× lower</td></tr>
+    </tbody>
+  </table>
+
+  <div class="bars">
+    <div class="legend"><span><i style="background:var(--stock)"></i>Stock</span><span><i style="background:var(--batch)"></i>Batch 0.1.3</span><span>bar length ∝ latency (max = 9,492 ms)</span></div>
+    <!-- widths are percentage of the 9492 ms max -->
+    <div class="barrow"><div class="plabel">p50</div><div class="bartrack">
+      <div class="bar stock" style="width:1.2%"><span class="out">115 ms</span></div>
+      <div class="bar batch" style="width:0.4%"><span class="out">35 ms</span></div></div></div>
+    <div class="barrow"><div class="plabel">p75</div><div class="bartrack">
+      <div class="bar stock" style="width:1.9%"><span class="out">185 ms</span></div>
+      <div class="bar batch" style="width:0.5%"><span class="out">50 ms</span></div></div></div>
+    <div class="barrow"><div class="plabel">p90</div><div class="bartrack">
+      <div class="bar stock" style="width:25.9%"><span class="out">2,460 ms</span></div>
+      <div class="bar batch" style="width:0.8%"><span class="out">79 ms</span></div></div></div>
+    <div class="barrow"><div class="plabel">p95</div><div class="bartrack">
+      <div class="bar stock" style="width:50.5%"><span>4,793 ms</span></div>
+      <div class="bar batch" style="width:1.3%"><span class="out">119 ms</span></div></div></div>
+    <div class="barrow"><div class="plabel">p99</div><div class="bartrack">
+      <div class="bar stock" style="width:100%"><span>9,492 ms</span></div>
+      <div class="bar batch" style="width:2.5%"><span class="out">235 ms</span></div></div></div>
+  </div>
+
+  <h3>New Relic intake</h3>
+
+  <div class="headline">
+    <div class="card">
+      <div class="label">Stock HttpAppender</div>
+      <div class="big stock">4.68 <span style="font-size:16px;color:var(--muted)">req/s</span></div>
+      <div class="note">avg 893 ms &middot; p90 238 ms &middot; 276 reqs &middot; 100% ok</div>
+    </div>
+    <div class="card">
+      <div class="label">Batch appender (0.1.3)</div>
+      <div class="big batch">84.96 <span style="font-size:16px;color:var(--muted)">req/s</span></div>
+      <div class="note">avg 59 ms &middot; p90 101 ms &middot; 5,093 reqs &middot; 100% ok</div>
+    </div>
+  </div>
+
+  <table>
+    <thead>
+      <tr><th>Metric</th><th>Stock HttpAppender</th><th>Batch appender 0.1.3</th><th>Improvement</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Requests / sec</td><td class="stock">4.68</td><td class="batch">84.96</td><td class="win">18.14×</td></tr>
+      <tr><td>Total requests (60 s)</td><td class="stock">276</td><td class="batch">5,093</td><td class="win">18.5×</td></tr>
+      <tr><td>Success rate</td><td class="stock">100%</td><td class="batch">100%</td><td>—</td></tr>
+      <tr><td>Average latency</td><td class="stock">893 ms</td><td class="batch">59 ms</td><td class="win">15.1× lower</td></tr>
+      <tr><td>p50</td><td class="stock">109 ms</td><td class="batch">35 ms</td><td class="win">3.1×</td></tr>
+      <tr><td>p75</td><td class="stock">146 ms</td><td class="batch">52 ms</td><td class="win">2.8×</td></tr>
+      <tr><td>p90</td><td class="stock">238 ms</td><td class="batch">101 ms</td><td class="win">2.4×</td></tr>
+      <tr><td>p95</td><td class="stock">6,847 ms</td><td class="batch">149 ms</td><td class="win">46×</td></tr>
+      <tr><td>p99</td><td class="stock">19,627 ms</td><td class="batch">265 ms</td><td class="win">74×</td></tr>
+      <tr><td>Fastest</td><td class="stock">36 ms</td><td class="batch">14 ms</td><td>—</td></tr>
+      <tr><td>Slowest</td><td class="stock">25,715 ms</td><td class="batch">6,090 ms</td><td class="win">4.2× lower</td></tr>
+    </tbody>
+  </table>
+
+  <div class="bars">
+    <div class="legend"><span><i style="background:var(--stock)"></i>Stock</span><span><i style="background:var(--batch)"></i>Batch 0.1.3</span><span>bar length ∝ latency (max = 19,627 ms)</span></div>
+    <!-- widths are percentage of the 19627 ms max -->
+    <div class="barrow"><div class="plabel">p50</div><div class="bartrack">
+      <div class="bar stock" style="width:0.6%"><span class="out">109 ms</span></div>
+      <div class="bar batch" style="width:0.2%"><span class="out">35 ms</span></div></div></div>
+    <div class="barrow"><div class="plabel">p75</div><div class="bartrack">
+      <div class="bar stock" style="width:0.7%"><span class="out">146 ms</span></div>
+      <div class="bar batch" style="width:0.3%"><span class="out">52 ms</span></div></div></div>
+    <div class="barrow"><div class="plabel">p90</div><div class="bartrack">
+      <div class="bar stock" style="width:1.2%"><span class="out">238 ms</span></div>
+      <div class="bar batch" style="width:0.5%"><span class="out">101 ms</span></div></div></div>
+    <div class="barrow"><div class="plabel">p95</div><div class="bartrack">
+      <div class="bar stock" style="width:34.9%"><span class="out">6,847 ms</span></div>
+      <div class="bar batch" style="width:0.8%"><span class="out">149 ms</span></div></div></div>
+    <div class="barrow"><div class="plabel">p99</div><div class="bartrack">
+      <div class="bar stock" style="width:100%"><span>19,627 ms</span></div>
+      <div class="bar batch" style="width:1.4%"><span class="out">265 ms</span></div></div></div>
+  </div>
+
+  <p class="cfg-note">The New Relic pair inverts where the stock appender's cost shows up: its
+  p90 of 238 ms is close to the batch app's 101 ms, and the blowout arrives between p90 and p95
+  (238 ms → 6,847 ms) rather than before p90 as on the Datadog side. Both stock runs end in the
+  same place — a tail an order of magnitude or two above their own median — and both batch runs
+  hold a 35 ms median. The throughput ratios, 15.97× and 18.14×, land within the roughly 2×
+  run-to-run variance observed on this platform, which is the honest resolution of the gap
+  between them rather than a vendor difference.</p>
+
+  <!-- ============================ CloudHub 2.0 ============================ -->
+  <h2>CloudHub 2.0 <span class="tag">— 0.1 vCore replica · <code>/log?count=15</code> · 17 events/request · load windows <code>13:49:58Z–13:50:58Z</code> (batch) and <code>13:51:21Z–13:52:22Z</code> (stock)</span></h2>
+
+  <h3>Datadog intake</h3>
+
+  <div class="headline">
+    <div class="card">
+      <div class="label">Stock HttpAppender</div>
+      <div class="big stock">17.86 <span style="font-size:16px;color:var(--muted)">req/s</span></div>
+      <div class="note">avg 281 ms &middot; p90 471 ms &middot; 1,067 reqs &middot; 100% ok</div>
+    </div>
+    <div class="card">
+      <div class="label">Batch appender (0.1.3)</div>
+      <div class="big batch">21.27 <span style="font-size:16px;color:var(--muted)">req/s</span></div>
+      <div class="note">avg 236 ms &middot; p90 390 ms &middot; 1,272 reqs &middot; 100% ok</div>
+    </div>
+  </div>
+
+  <table>
+    <thead>
+      <tr><th>Metric</th><th>Stock HttpAppender</th><th>Batch appender 0.1.3</th><th>Improvement</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Requests / sec</td><td class="stock">17.86</td><td class="batch">21.27</td><td class="win">1.19×</td></tr>
+      <tr><td>Total requests (60 s)</td><td class="stock">1,067</td><td class="batch">1,272</td><td class="win">1.19×</td></tr>
+      <tr><td>Success rate</td><td class="stock">100%</td><td class="batch">100%</td><td>—</td></tr>
+      <tr><td>Average latency</td><td class="stock">281 ms</td><td class="batch">236 ms</td><td class="win">1.19× lower</td></tr>
+      <tr><td>p50</td><td class="stock">229 ms</td><td class="batch">204 ms</td><td class="win">1.1×</td></tr>
+      <tr><td>p75</td><td class="stock">315 ms</td><td class="batch">297 ms</td><td class="win">1.1×</td></tr>
+      <tr><td>p90</td><td class="stock">471 ms</td><td class="batch">390 ms</td><td class="win">1.2×</td></tr>
+      <tr><td>p95</td><td class="stock">579 ms</td><td class="batch">455 ms</td><td class="win">1.3×</td></tr>
+      <tr><td>p99</td><td class="stock">1,105 ms</td><td class="batch">678 ms</td><td class="win">1.6×</td></tr>
+      <tr><td>Fastest</td><td class="stock">34 ms</td><td class="batch">21 ms</td><td>—</td></tr>
+      <tr><td>Slowest</td><td class="stock">1,437 ms</td><td class="batch">937 ms</td><td class="win">1.5× lower</td></tr>
+    </tbody>
+  </table>
+
+  <div class="bars">
+    <div class="legend"><span><i style="background:var(--stock)"></i>Stock</span><span><i style="background:var(--batch)"></i>Batch 0.1.3</span><span>bar length ∝ latency (max = 1,105 ms)</span></div>
+    <!-- widths are percentage of the 1105 ms max -->
+    <div class="barrow"><div class="plabel">p50</div><div class="bartrack">
+      <div class="bar stock" style="width:20.7%"><span class="out">229 ms</span></div>
+      <div class="bar batch" style="width:18.5%"><span class="out">204 ms</span></div></div></div>
+    <div class="barrow"><div class="plabel">p75</div><div class="bartrack">
+      <div class="bar stock" style="width:28.5%"><span class="out">315 ms</span></div>
+      <div class="bar batch" style="width:26.9%"><span class="out">297 ms</span></div></div></div>
+    <div class="barrow"><div class="plabel">p90</div><div class="bartrack">
+      <div class="bar stock" style="width:42.6%"><span>471 ms</span></div>
+      <div class="bar batch" style="width:35.3%"><span>390 ms</span></div></div></div>
+    <div class="barrow"><div class="plabel">p95</div><div class="bartrack">
+      <div class="bar stock" style="width:52.4%"><span>579 ms</span></div>
+      <div class="bar batch" style="width:41.2%"><span>455 ms</span></div></div></div>
+    <div class="barrow"><div class="plabel">p99</div><div class="bartrack">
+      <div class="bar stock" style="width:100%"><span>1,105 ms</span></div>
+      <div class="bar batch" style="width:61.4%"><span>678 ms</span></div></div></div>
+  </div>
+
+  <p class="cfg-note">This is the one pair where batching buys almost nothing: <b>1.19×</b>
+  sits inside the roughly 2× run-to-run variance observed on repeated CloudHub passes, so it is
+  directional only and not distinguishable from noise on a single run. Note what is <em>not</em>
+  broken here — the stock appender holds a 229 ms median and a 1,437 ms slowest, nothing like
+  the multi-second stalls it produces on CloudHub 1.0. Both apps are running into the same
+  ceiling, and the ceiling is not the appender.</p>
+
+  <h3>New Relic intake</h3>
+
+  <div class="headline">
+    <div class="card">
+      <div class="label">Stock HttpAppender</div>
+      <div class="big stock">4.30 <span style="font-size:16px;color:var(--muted)">req/s</span></div>
+      <div class="note">avg 1,028 ms &middot; p90 1,009 ms &middot; 253 reqs &middot; 100% ok</div>
+    </div>
+    <div class="card">
+      <div class="label">Batch appender (0.1.3)</div>
+      <div class="big batch">16.44 <span style="font-size:16px;color:var(--muted)">req/s</span></div>
+      <div class="note">avg 304 ms &middot; p90 485 ms &middot; 982 reqs &middot; 100% ok</div>
+    </div>
+  </div>
+
+  <table>
+    <thead>
+      <tr><th>Metric</th><th>Stock HttpAppender</th><th>Batch appender 0.1.3</th><th>Improvement</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Requests / sec</td><td class="stock">4.30</td><td class="batch">16.44</td><td class="win">3.82×</td></tr>
+      <tr><td>Total requests (60 s)</td><td class="stock">253</td><td class="batch">982</td><td class="win">3.9×</td></tr>
+      <tr><td>Success rate</td><td class="stock">100%</td><td class="batch">100%</td><td>—</td></tr>
+      <tr><td>Average latency</td><td class="stock">1,028 ms</td><td class="batch">304 ms</td><td class="win">3.4× lower</td></tr>
+      <tr><td>p50</td><td class="stock">346 ms</td><td class="batch">275 ms</td><td class="win">1.3×</td></tr>
+      <tr><td>p75</td><td class="stock">505 ms</td><td class="batch">324 ms</td><td class="win">1.6×</td></tr>
+      <tr><td>p90</td><td class="stock">1,009 ms</td><td class="batch">485 ms</td><td class="win">2.1×</td></tr>
+      <tr><td>p95</td><td class="stock">1,288 ms</td><td class="batch">605 ms</td><td class="win">2.1×</td></tr>
+      <tr><td>p99</td><td class="stock">22,036 ms</td><td class="batch">1,474 ms</td><td class="win">15×</td></tr>
+      <tr><td>Fastest</td><td class="stock">98 ms</td><td class="batch">33 ms</td><td>—</td></tr>
+      <tr><td>Slowest</td><td class="stock">22,152 ms</td><td class="batch">2,310 ms</td><td class="win">9.6× lower</td></tr>
+    </tbody>
+  </table>
+
+  <div class="bars">
+    <div class="legend"><span><i style="background:var(--stock)"></i>Stock</span><span><i style="background:var(--batch)"></i>Batch 0.1.3</span><span>bar length ∝ latency (max = 22,036 ms)</span></div>
+    <!-- widths are percentage of the 22036 ms max -->
+    <div class="barrow"><div class="plabel">p50</div><div class="bartrack">
+      <div class="bar stock" style="width:1.6%"><span class="out">346 ms</span></div>
+      <div class="bar batch" style="width:1.2%"><span class="out">275 ms</span></div></div></div>
+    <div class="barrow"><div class="plabel">p75</div><div class="bartrack">
+      <div class="bar stock" style="width:2.3%"><span class="out">505 ms</span></div>
+      <div class="bar batch" style="width:1.5%"><span class="out">324 ms</span></div></div></div>
+    <div class="barrow"><div class="plabel">p90</div><div class="bartrack">
+      <div class="bar stock" style="width:4.6%"><span class="out">1,009 ms</span></div>
+      <div class="bar batch" style="width:2.2%"><span class="out">485 ms</span></div></div></div>
+    <div class="barrow"><div class="plabel">p95</div><div class="bartrack">
+      <div class="bar stock" style="width:5.8%"><span class="out">1,288 ms</span></div>
+      <div class="bar batch" style="width:2.7%"><span class="out">605 ms</span></div></div></div>
+    <div class="barrow"><div class="plabel">p99</div><div class="bartrack">
+      <div class="bar stock" style="width:100%"><span>22,036 ms</span></div>
+      <div class="bar batch" style="width:6.7%"><span class="out">1,474 ms</span></div></div></div>
+  </div>
+
+  <p class="cfg-note">The appender code is the same across all four apps, and within each
+  vendor-and-platform pair the batch-vs-stock contrast is what holds. Across the four pairs the
+  spread is <b>16–18× on CloudHub 1.0 against 1.2–3.8× on CloudHub 2.0</b> — the platform moves
+  the result far more than the vendor does. The explanation that fits is a CPU-capped
+  CloudHub 2.0 replica bottlenecked upstream of the appender, against a CloudHub 1.0 worker with
+  headroom a synchronous appender cannot use; these runs did not measure that mechanism
+  directly. Read each table against its own stock column, not against a table on the other
+  platform — the two generations have different CPU models. See the caveats below.</p>
+
+  <!-- ============================ Shared: methodology ============================ -->
+  <h2>What was tested</h2>
+  <p>Two batch/stock pairs of functionally identical Mule 4 applications — one member of each
+  pair on Log4j2's stock <code>&lt;Http&gt;</code> appender, the other on this library's
+  <code>&lt;BatchHttp&gt;</code> (v0.1.3) — one pair shipping to the <b>Datadog</b> Logs intake
+  and one to the <b>New Relic</b> Logs intake, all four deployed to each platform. Within a pair
+  the apps share the same flow, the same <code>&lt;Loggers&gt;</code> wiring, and the same file
+  appender; the <b>only substantive difference is the appender element</b>. Each request to
+  <code>/log?count=15</code> emits <b>17 log events</b> — a <code>batch.start</code>, 15
+  <code>order.processed</code>, and a <code>batch.completed</code>. The same
+  <code>count=15</code> was used on both platforms:</p>
+  <ul>
+    <li><b>Stock</b> — Log4j2's built-in <code>HttpAppender</code>: one synchronous HTTP POST per log event.</li>
+    <li><b>Batch (0.1.3)</b> — this library's <code>&lt;BatchHttp&gt;</code> appender: events are enqueued non-blocking and shipped in batches by background threads.</li>
+  </ul>
+  <p>Load was generated with <a href="https://github.com/hatoo/oha"><code>oha</code></a>
+  (<code>--no-tui -z 1m -c 5</code>) at 5 concurrent connections for 60 seconds over plain
+  <code>http</code>. Each app was first primed with
+  a <b>5-request warmup</b> (to prime the JVM's JIT, the connection pool, and the batch
+  flusher) followed by a <b>10 s pause</b> before the measured run — this eliminated the
+  first-run throughput swings a lighter single-request warmup produced. The
+  <code>&quot;aborted due to deadline&quot;</code> entries are in-flight requests cut off at the
+  60 s mark.</p>
+  <p>The two vendors were driven <b>paired-parallel, one vendor per side</b>: each phase put a
+  Datadog app and a New Relic app under load at the same instant — the two batch apps together,
+  then the two stock apps together — so <b>no vendor's intake was ever loaded by two apps at
+  once</b> and neither app of a comparison waited on the other's intake. Measured 2026-08-03.
+  Every one of the eight runs completed the full 60 s at <b>100% success</b>.</p>
+  <p>Each run independently corroborates the load parameters: requests/sec × mean latency ≈ the
+  concurrency of 5 (Little's Law) holds to within 0.1–16% across all eight. Three runs — the
+  CloudHub 1.0 stock pair and the CloudHub 2.0 New Relic stock run — needed a <b>×10 latency
+  correction</b> for a known <code>oha</code> 1.14.0 unit-selection defect, which prints a
+  <code>0.0774 10 sec</code>-shaped value where it means <code>0.774 sec</code>. Every figure on
+  this page is already corrected; the correction touches latency only, not request counts or
+  requests/sec.</p>
+
+  <h3>Sample log event</h3>
+  <p class="cfg-note">The flow emits each event as a JSON object — <b>byte-for-byte identical
+  across the two apps of a vendor pair</b> so the payload never skews the comparison. (The New
+  Relic pair leads its object with an extra <code>message</code> summary key, which that vendor's
+  Logs UI requires; the Datadog pair does not. That difference is <em>between</em> the two pairs,
+  never inside one, so each batch-vs-stock contrast is still payload-identical.) The flow writes
+  it pretty-printed (multi-line, so the CloudHub file log stays human-readable) and the vendor
+  appender's layout collapses it to one line, ~240–350 characters. A representative
+  <code>order.processed</code> event from the Datadog pair, as the intake receives it:</p>
+<pre><code>{"generatedAt":"2026-01-01T00:00:00.000Z","event":"order.processed","orderId":"b3b1f2c4-5d6e-47a8-9f01-23456789abcd","sequence":1,"of":15,"level":"info","region":"region-a","source":"mule","customer":"cust-1","amount":19.95,"currency":"USD","orderStatus":"SHIPPED","warehouse":"wh-a-03","carrier":"expedited-air","note":"synthetic order event emitted to exercise the log pipeline end to end"}</code></pre>
+  <p class="cfg-note">Built in the Mule flow as a DataWeave string literal (the multi-line,
+  indented form the <code>FILE</code> appender keeps verbatim); the vendor appender's
+  <code>%replace{%m}{^\x7B\s*|[\r\n]+\s*}{}</code> strips the leading brace and every
+  newline+indent to yield the single line above. <code>generatedAt</code> (UTC ISO-8601) is the
+  flow's own first field — when the business event occurred, emitted by the DataWeave expression
+  rather than by the appender, so both halves of the pair report the same clock reading. The
+  vendor's <code>service</code>, <code>host</code> and <code>platform</code> facets are added
+  <b>from config</b> — see "Logging configuration under test" below. Note the message itself
+  carries <em>no</em> <code>service</code>/<code>host</code>:
+  those identity facets come from <code>log4j2.xml</code>, not the log line. A run at
+  <code>count=15</code> wraps the loop with a <code>batch.start</code> (INFO) and a
+  <code>batch.completed</code> (WARN); <code>/boom</code> emits an <code>order.failed</code> (ERROR)
+  with a stack trace.</p>
+
+  <div class="disclaim">
+    <b>Why the stock appender stalls:</b> its per-event send holds the request thread for the
+    full round-trip to the intake API. Under 5 concurrent clients — each firing 17
+    events per request — the worker's small thread pool saturates, so most requests queue
+    behind an in-flight HTTP send. That is the bimodal latency three of the four stock runs
+    show: a median in the low hundreds of milliseconds against a p99 of many seconds. The batch
+    appender returns from the logging call immediately, so
+    request latency is decoupled from intake latency. The CloudHub 2.0 Datadog stock run is the
+    one that does not do this — see that section for what it suggests instead.
+  </div>
+
+  <div class="disclaim warn">
+    <b>Caveats — read the numbers as directional, not absolute.</b> All seven apply to every
+    figure on this page.
+    <ul style="margin:8px 0 0; padding-left:20px;">
+      <li><b>One run per pair, no median.</b> Each of the four vendor-and-platform pairs was
+      measured once. Nothing here is a median of repeated passes, so the pattern is
+      directional, not established.</li>
+      <li><b>Roughly 2× run-to-run variance has been observed on CloudHub 1.0</b> across
+      repeated passes. The CloudHub 2.0 Datadog figure of <b>1.19× sits inside that band</b>
+      and is therefore directional only — not distinguishable from noise on a single run. The
+      variance is stated as observed; its cause is not established here.</li>
+      <li><b>The CloudHub 1.0 workers were freshly deployed with no accumulated burst
+      balance</b>, so those runs were measured at baseline CPU rather than on burst headroom.
+      That makes 16–18× a <b>floor</b> rather than a flattering peak — worth stating because it
+      is the opposite of the usual suspicion about a burstable worker.</li>
+      <li><b><code>gzip</code> and <code>spillEnabled</code> were disabled in these demos</b>,
+      so this measures <b>batching in isolation</b> rather than the appender as it would be
+      deployed. Compression is off precisely because the stock <code>&lt;Http&gt;</code>
+      appender cannot compress and leaving it on would vary two things at once. See "Logging
+      configuration under test" below.</li>
+      <li><b>Compare within a plane, not across.</b> CloudHub 1.0 and CloudHub 2.0 have
+      different CPU models — burstable versus hard-capped — so the two platform sections are
+      not a controlled comparison of each other, whatever else was held constant between them.
+      Each table stands as a batch-vs-stock contrast within its own vendor and platform.</li>
+      <li><b>Throughput and mean latency are one measurement, not two.</b> The load is
+      closed-loop: <code>oha</code> at 5 connections with no rate limit keeps five requests in
+      flight at all times, so requests/sec is the arithmetic consequence of mean latency
+      (concurrency ÷ mean latency). The req/s row and the average-latency row are the same
+      result viewed twice, not two independent wins. The percentiles are unaffected.</li>
+      <li><b>One observed and unexplained artifact.</b> On both CloudHub 1.0 batch apps,
+      exactly five requests — matching the concurrency — stalled together for several seconds
+      and then recovered: near 4.4 s on the Datadog app, near 6.1 s on the New Relic one,
+      against medians of 35 ms. It is five requests in roughly five thousand and moves neither
+      the medians nor the ratios. Reported as observed; the cause is unexplained.</li>
+    </ul>
+  </div>
+
+  <!-- ============================ Shared: config ============================ -->
+  <h2>Logging configuration under test</h2>
+  <p>The appender config from each app's <code>log4j2.xml</code> (comments stripped). The
+  <b>Datadog pair is shown</b>; the New Relic pair is the same shape with that vendor's own
+  attributes and intake, and the batch tuning below is byte-for-byte the same in both batch
+  apps. Both apps of the pair shown ship to the same Datadog Logs intake and set the Datadog
+  <code>service</code> and
+  <code>host</code> facets, plus a <code>platform</code> facet naming the CloudHub generation,
+  <b>from config, not from the log message</b> — via a <code>&lt;Properties&gt;</code> block that
+  is identical in both apps <b>except</b> for the <code>service</code> default, which is each
+  app's own name so the two runs stay separable in Datadog:</p>
+<pre><code>&lt;Properties&gt;
+    &lt;!-- Datadog facets, from config so per-app identity does not come from the
+         log message. Log4j2 lookups, NOT Mule ${...} placeholders. app.service
+         identifies the APP and defaults to this app's own name
+         (datadog-stock-http in the stock sibling); app.platform identifies the
+         PLANE and defaults to "unspecified". Both are settable per deployment
+         (-Dapp.service=… / -Dapp.platform=…), and an override you no longer want
+         must be DELETED rather than cleared: a property that is present but EMPTY
+         beats a ${sys:x:-default} default and silently blanks the facet. host and
+         site are the same expression in both. --&gt;
+    &lt;Property name="app.service"&gt;${sys:app.service:-datadog-batch-http}&lt;/Property&gt;
+    &lt;Property name="app.platform"&gt;${sys:app.platform:-${env:APP_PLATFORM:-unspecified}}&lt;/Property&gt;
+    &lt;Property name="dd.host"&gt;${sys:domain:-${env:HOSTNAME:-${hostName}}}&lt;/Property&gt;
+    &lt;Property name="dd.site"&gt;${sys:dd.site:-${env:DD_SITE:-…}}&lt;/Property&gt;
+&lt;/Properties&gt;</code></pre>
+
+  <div class="cfg">
+    <div>
+      <h3 class="stock">Stock — Log4j2 <code>&lt;Http&gt;</code> (one POST per event)</h3>
+<pre><code>&lt;Configuration status="WARN"&gt;
+
+&lt;Http name="datadog"
+      url="${sys:dd.logUrl:-https://${dd.site}
+           /api/v2/logs}"
+      connectTimeoutMillis="10000"
+      readTimeoutMillis="10000"&gt;
+    &lt;Property name="DD-API-KEY"
+              value="${sys:DD_API_KEY:-…:-MISSING_KEY}}"/&gt;
+    &lt;Property name="Content-Type" value="application/json"/&gt;
+    &lt;PatternLayout pattern='{
+      <span class="diff-stock">"service":"${app.service}",
+      "host":"${dd.host}",</span>
+      "platform":"${app.platform}",
+      %replace{%m}{^\x7B\s*|[\r\n]+\s*}{}'/&gt;
+&lt;/Http&gt;</code></pre>
+    </div>
+    <div>
+      <h3 class="batch">Batch — <code>&lt;BatchHttp&gt;</code> 0.1.3 (batched)</h3>
+<pre><code>&lt;Configuration status="INFO"
+    packages="com.mulesoft.support.batchhttp.log4j2"&gt;
+
+&lt;BatchHttp name="datadog"
+           vendor="datadog"
+           site="${dd.site}"
+           apiKey="${sys:DD_API_KEY:-…:-MISSING_KEY}}"
+           <span class="diff-add">service="${app.service}"
+           host="${dd.host}"</span>
+           source="mule"
+           maxBatchRecords="200"  maxBatchBytes="900000"
+           lingerMillis="2000"    queueCapacity="25000"
+           gzip="false"           maxRetries="3"
+           flusherThreads="1"     includeTimestamp="false"
+           spillEnabled="false"   spillFormat="BINARY"
+           …spill/diagnostics knobs…&gt;
+    &lt;PatternLayout pattern='{
+      "platform":"${app.platform}",
+      %replace{%m}{^\x7B\s*|[\r\n]+\s*}{}'/&gt;
+&lt;/BatchHttp&gt;</code></pre>
+    </div>
+  </div>
+  <p class="cfg-note">Both layouts collapse the flow's pretty JSON to one line, and neither stamps
+  a timestamp of its own — <code>generatedAt</code> comes from the flow, so the event time is
+  the same in both apps regardless of appender, and <code>includeTimestamp="false"</code> stops the
+  batch sink adding a competing one. The difference is <b>where the Datadog facets come
+  from</b>: the stock <code>&lt;Http&gt;</code> exposes no <code>service</code>/<code>host</code>
+  attributes, so both are injected into its <code>PatternLayout</code> (its output <em>is</em> the
+  POST body); the batch <code>&lt;BatchHttp&gt;</code> sets them as appender attributes and the sink
+  emits them as top-level envelope facets. Either way Datadog receives the <b>identical</b>
+  top-level <code>service</code>/<code>host</code>. The <code>platform</code> facet comes from the
+  layout on <em>both</em> sides, because the layout is the one mechanism the two appenders share.
+  Stock uses <code>status="WARN"</code> and no
+  <code>packages</code> scan (the <code>&lt;Http&gt;</code> appender ships with log4j-core); batch
+  uses <code>status="INFO"</code> so its diagnostics/heartbeat surface, and <code>packages</code>
+  so Log4j2 discovers the <code>&lt;BatchHttp&gt;</code> plugin.</p>
+
+  <p class="cfg-note">The batch app also overrides three library defaults, each to keep the
+  comparison to the appender alone. <code>gzip="false"</code> (the library default is
+  <code>true</code>) because the stock <code>&lt;Http&gt;</code> appender has no compression option
+  at all, so leaving it on would vary batching <em>and</em> compression; both apps therefore POST
+  plaintext JSON. <code>spillEnabled="false"</code> (the library default is also <code>true</code>)
+  because the disk-spill buffer adds a replay thread and failure-path disk I/O that the stock
+  appender has no equivalent of — real competitors for a tenth of a core. Every other
+  <code>spill*</code> attribute stays in the file but is inert.
+  <code>includeTimestamp="false"</code> (default <code>true</code>) omits the vendor's reserved
+  event-time field so the vendor stamps its own arrival time and
+  <code>arrival − generatedAt</code> stays readable as ingest lag; the stock siblings' layouts
+  carry no such key either, so both halves are measured identically. A production app would
+  leave compression and spill on, which is why <b>these figures measure batching in isolation
+  rather than the appender as deployed</b> — treat those as separate measurements rather than
+  properties of these demos. The remaining tuning —
+  <code>maxBatchRecords="200"</code>, <code>maxBatchBytes="900000"</code>,
+  <code>lingerMillis="2000"</code>, <code>queueCapacity="25000"</code> and a single flusher
+  thread — is identical across both batch apps.</p>
+
+  <h3>Async logging — identical in both apps</h3>
+  <p class="cfg-note">The <code>&lt;Loggers&gt;</code> block is the same in both apps, so the
+  appender is the only variable. CloudHub requires async appenders, so every logger here is async.
+  Only the application logger routes to the Datadog appender; the root carries the local file
+  alone, because the vendor layout wraps the flow's JSON message and a plain-text framework line
+  would render as an invalid document.</p>
+<pre><code>&lt;Loggers&gt;
+    &lt;AsyncLogger name="com.mulesoft.support.batchhttp.muledemo" level="INFO" additivity="false"&gt;
+        &lt;AppenderRef ref="datadog"/&gt;
+        &lt;AppenderRef ref="FILE"/&gt;
+    &lt;/AsyncLogger&gt;
+
+    &lt;AsyncLogger name="com.gigaspaces" level="ERROR"/&gt;
+    &lt;AsyncLogger name="com.j_spaces" level="ERROR"/&gt;
+    &lt;AsyncLogger name="com.sun.jini" level="ERROR"/&gt;
+    &lt;AsyncLogger name="net.jini" level="ERROR"/&gt;
+    &lt;AsyncLogger name="org.apache" level="WARN"/&gt;
+    &lt;AsyncLogger name="org.apache.cxf" level="WARN"/&gt;
+    &lt;AsyncLogger name="org.springframework.beans.factory" level="WARN"/&gt;
+    &lt;AsyncLogger name="org.mule" level="INFO"/&gt;
+    &lt;AsyncLogger name="com.mulesoft" level="INFO"/&gt;
+    &lt;AsyncLogger name="org.jetel" level="WARN"/&gt;
+    &lt;AsyncLogger name="Tracking" level="WARN"/&gt;
+
+    &lt;AsyncRoot level="INFO"&gt;
+        &lt;AppenderRef ref="FILE"/&gt;
+    &lt;/AsyncRoot&gt;
+&lt;/Loggers&gt;</code></pre>
+
+  <footer>
+    Measured 2026-08-03 on CloudHub 1.0 (0.1 vCore worker) and CloudHub 2.0 (0.1 vCore replica),
+    two vendor pairs — Datadog and New Relic — with
+    <code>oha --no-tui -z 1m -c 5</code> (5 connections × 60 s over plain <code>http</code>,
+    5-request warmup and a 10 s pause, <code>/log?count=15</code> for 17 events per request),
+    run paired-parallel with one vendor per side. All eight runs finished the full 60 s at
+    100% success. Endpoint URLs omitted intentionally.
+    Numbers are single-run and will vary with worker load, vendor rate limits, and intake
+    responsiveness; roughly 2× run-to-run variance has been observed on CloudHub 1.0, and the
+    two platforms have different CPU models, so their tables are not comparable with each other
+    — see the caveats above. Latency figures for three runs carry a ×10 correction for an
+    <code>oha</code> 1.14.0 unit-selection defect. Generated for
+    batch-http-appender v0.1.3.
+  </footer>
+
+</div>
+</body>
+</html>

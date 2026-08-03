@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>com.mulesoft.support.batchhttp</groupId>
+    <artifactId>mule-datadog-stock-http-demo</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <packaging>mule-application</packaging>
+    <name>Mule 4.9 Datadog Stock HttpAppender Demo (A/B control)</name>
+    <!--
+      CONTROL SIBLING of mule-datadog-demo.
+
+      Identical Mule app (same flow, same workload, same Datadog endpoint) with
+      exactly ONE variable changed: instead of our batching <BatchHttp> appender it
+      uses Log4j2's STOCK, built-in <Http> appender, which sends one SYNCHRONOUS
+      HTTP POST per log event. Run both side-by-side and compare to measure the
+      performance impact of batching.
+
+      Note there is NO dependency on batch-http-log4j2 here. The stock HttpAppender
+      is part of log4j-core, which the Mule runtime already provides on its
+      container classloader — so this app needs no custom appender jar at all. That
+      is what makes it a clean control: the only difference from the batch app is
+      the appender element in log4j2.xml.
+    -->
+    <properties>
+        <app.runtime>4.9.15</app.runtime>
+        <maven.compiler.release>17</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <mule.maven.plugin.version>4.10.0</mule.maven.plugin.version>
+    </properties>
+    <dependencies>
+        <!-- HTTP listener connector for the demo flow (same as the batch sibling). -->
+        <dependency>
+            <groupId>org.mule.connectors</groupId>
+            <artifactId>mule-http-connector</artifactId>
+            <version>1.10.3</version>
+            <classifier>mule-plugin</classifier>
+        </dependency>
+        <!--
+          Intentionally NO logging dependency. log4j2's stock HttpAppender ships in
+          log4j-core, provided by the Mule runtime container classloader. Bundling a
+          second copy of log4j here would cause a LinkageError / plugin-discovery
+          conflict — the same reason the batch sibling excludes log4j from its
+          appender dependency.
+        -->
+    </dependencies>
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.mule.tools.maven</groupId>
+                <artifactId>mule-maven-plugin</artifactId>
+                <version>${mule.maven.plugin.version}</version>
+                <extensions>true</extensions>
+                <configuration>
+                    <classifier>mule-application</classifier>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+    <repositories>
+        <repository>
+            <id>mulesoft-releases</id>
+            <name>MuleSoft Releases Repository</name>
+            <url>https://repository.mulesoft.org/releases/</url>
+            <layout>default</layout>
+        </repository>
+        <repository>
+            <id>mulesoft-public</id>
+            <name>MuleSoft Public Repository</name>
+            <url>https://repository.mulesoft.org/nexus/content/repositories/public/</url>
+        </repository>
+    </repositories>
+    <pluginRepositories>
+        <pluginRepository>
+            <id>mulesoft-releases</id>
+            <name>MuleSoft Releases Repository</name>
+            <url>https://repository.mulesoft.org/releases/</url>
+        </pluginRepository>
+        <pluginRepository>
+            <id>mulesoft-public</id>
+            <name>MuleSoft Public Repository</name>
+            <url>https://repository.mulesoft.org/nexus/content/repositories/public/</url>
+        </pluginRepository>
+    </pluginRepositories>
+</project>

@@ -1,0 +1,291 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Mule application Log4j2 configuration.
+
+  IMPORTANT — how the New Relic API key is injected:
+    This file is parsed by Log4j2, NOT by Mule's property resolver, so Mule
+    ${...} placeholders do NOT work here. Use a Log4j2 lookup instead:
+
+      ${sys:newrelic.apiKey}   -> JVM system property  (-Dnewrelic.apiKey=...)
+      ${env:NEW_RELIC_API_KEY} -> environment variable
+
+    The config below prefers the system property and falls back to the env var:
+      ${sys:newrelic.apiKey:-${env:NEW_RELIC_API_KEY:-MISSING_KEY}}
+
+    Set it at runtime, e.g. in CloudHub via a property/secure property mapped to
+    a JVM arg, or locally:  -Dnewrelic.apiKey=YOUR_KEY
+
+  The `packages` attribute makes Log4j2 scan our plugin package so the <BatchHttp>
+  element is recognized inside the Mule app classloader.
+
+  status="INFO": the <BatchHttp> appender reports its OWN health (dropped batches, HTTP
+  status of failures, queue overflow) and an optional stats heartbeat to Log4j2's
+  StatusLogger — this `status` level is the floor that lets those lines (and the INFO
+  heartbeat) actually print to the runtime console. Drop to "WARN" to keep only failures.
+-->
+<Configuration status="INFO" packages="com.mulesoft.support.batchhttp.log4j2">
+
+    <Properties>
+        <!-- New Relic "service" facet: this app's identity, and the only field separating it from
+             its A/B sibling (newrelic-stock-http). Emitted as a plain (NRQL-queryable) attribute,
+             from config — NOT from the flow's log message. Defaults to this app's own name, so the
+             pair stays distinguishable with no configuration at all; override it per deployment
+             with -Dapp.service=... when a run needs a different label. If you stop wanting an
+             override, DELETE the property — do NOT clear it. Log4j2 substitutes a
+             ${sys:x:-default} default only when the property is ABSENT, so a present-but-empty
+             value resolves to "" and beats the default, silently blanking the facet; that is what
+             emptied the equivalent Datadog column once, after `service` had been overloaded with a
+             plane name and then cleared rather than removed. Name the plane with app.platform
+             below — this field is for the app. Log4j2 parses this file (NOT Mule's property
+             resolver), so a Mule ${...} placeholder would not resolve here either. -->
+        <Property name="app.service">${sys:app.service:-newrelic-batch-http}</Property>
+        <!-- Deployment-platform facet, emitted by the vendor layout below (see there). The same
+             app ships to BOTH CloudHub 1.0 and CloudHub 2.0, and neither existing facet separates
+             them: `service` is this app's name and is identical on both, while `hostname` is the
+             CH1 domain on one and the pod name on the other — the same string plus a suffix or a
+             hash, not a column you can split a platform on. Set it per deployment with
+             -Dapp.platform=cloudhub-1.0 or APP_PLATFORM=cloudhub-2.0; unset it reads
+             `unspecified` rather than guessing a plane. Both lookup keys are namespaced because
+             `sys:` and `env:` are shared with whatever the container already defines: a bare
+             PLATFORM is a plausible base-image variable and would silently shadow this facet.
+             The emitted JSON field stays `platform` — that is what the vendor queries filter on.
+             The delete-don't-clear rule from app.service above applies here too: a property that
+             is present but BLANK resolves to "" and beats the default. Set it on BOTH apps of the
+             pair — a value on one half only makes the A/B look like two platforms. -->
+        <Property name="app.platform">${sys:app.platform:-${env:APP_PLATFORM:-unspecified}}</Property>
+        <!-- New Relic reserved "hostname" facet (its Logs UI surfaces it) — the originating
+             instance, from config, NOT from the flow's log message. ${sys:domain} is the
+             CloudHub 1.0 application name (the same value the FILE appender uses below). Off CH1
+             that property is absent, so the chain falls through to the container/machine
+             hostname — on CH2 the pod. There is no overridable front link here: the chain already
+             resolves on every plane, so one would only add the empty-value risk above for no gain.
+             NOTE: DISTINCT from the appender's `host` attribute, which selects the
+             intake endpoint for the account's region. -->
+        <Property name="nr.hostname">${sys:domain:-${env:HOSTNAME:-${hostName}}}</Property>
+        <!-- New Relic Log API host for the data centre this account lives in. New Relic
+             publishes the host for each of its regions, so take the value from their
+             documentation rather than from this file. Deploy-time settable
+             (-Dnr.logHost=... or NEW_RELIC_LOG_HOST), falling back to the sink's own default.
+             DISTINCT from nr.hostname above: this selects the intake ENDPOINT, that one is the
+             reserved host FACET on each record. This property chain and its default are
+             DELIBERATELY IDENTICAL in the stock sibling (newrelic-stock-http), which builds its
+             full intake URL from it: an A/B pair whose two halves shipped to different regions
+             would not be a comparison at all. Change it here and you must change it there. -->
+        <Property name="nr.logHost">${sys:nr.logHost:-${env:NEW_RELIC_LOG_HOST:-log-api.newrelic.com}}</Property>
+    </Properties>
+
+    <Appenders>
+        <!-- CloudHub 1.0 custom log appender — the FILE appender reproduced EXACTLY as
+             documented at https://docs.mulesoft.com/cloudhub/custom-log-appender so the
+             CloudHub 1.0 log collector (and MuleSoft Support) can pick these files up. The
+             path convention /opt/mule/mule-CURRENT/logs/mule-${sys:domain}.log is mandatory;
+             ${sys:domain} resolves to the CloudHub application name at runtime.
+
+             The layout is the doc's classic text line
+             [%d{MM-dd HH:mm:ss.SSS}] %-5p %c{1} [%t]: %m%n. The message (%m) is a
+             pretty-printed, multi-line JSON object emitted by the flow — kept human-readable
+             here for the CloudHub file collector / Support. The vendor appender single-lines
+             the SAME %m (see below) so log backends ingest one event, not one line per field.
+             (Log4j2 auto-appends any stack trace.) -->
+        <RollingFile name="FILE"
+                     fileName="/opt/mule/mule-CURRENT/logs/mule-${sys:domain}.log"
+                     filePattern="/opt/mule/mule-CURRENT/logs/mule-${sys:domain}-%i.log">
+            <PatternLayout pattern="[%d{MM-dd HH:mm:ss.SSS}] %-5p %c{1} [%t]: %m%n"/>
+            <DefaultRolloverStrategy max="10"/>
+            <Policies>
+                <SizeBasedTriggeringPolicy size="10 MB" />
+            </Policies>
+        </RollingFile>
+
+        <!-- Batching HTTP appender shipping to the New Relic Log API (/log/v1).
+             `host` selects the intake endpoint, from the nr.logHost property above (override
+             per deployment with -Dnr.logHost=... or NEW_RELIC_LOG_HOST); the stock sibling
+             resolves the same property to the same default — see the note on nr.logHost.
+             `service`/`hostname` are set HERE (from config),
+             NOT inside the log message: `service` from the app.service property (this app's own
+             name by default, overridable with -Dapp.service) is a plain NRQL-queryable
+             attribute, and `hostname` from the nr.hostname property (${sys:domain} = the
+             CloudHub app name, falling through to the container hostname, with no override) is
+             New Relic's reserved host attribute. See the reasoning on both properties above.
+             The sink emits them as top-level facets on every record.
+             There is no `source` attribute here: New Relic has no reserved source facet.
+             Its documented equivalent is `logtype`, which the layout below emits (see there). -->
+        <BatchHttp name="newrelic"
+                   vendor="newrelic"
+                   host="${nr.logHost}"
+                   apiKey="${sys:NEW_RELIC_API_KEY:-${sys:newrelic.apiKey:-${env:NEW_RELIC_API_KEY:-MISSING_KEY}}}"
+                   service="${app.service}"
+                   hostname="${nr.hostname}"
+                   maxBatchRecords="200"
+                   maxBatchBytes="900000"
+                   lingerMillis="2000"
+                   queueCapacity="25000"
+                   overflowPolicy="DROP_NEWEST"
+                   gzip="false"
+                   maxRetries="3"
+                   requestTimeoutMillis="10000"
+                   shutdownDrainTimeoutMillis="5000"
+                   flusherThreads="1"
+                   includeStackTrace="true"
+                   includeTimestamp="false"
+                   diagnosticsLevel="INFO"
+                   statsIntervalMillis="60000"
+                   spillEnabled="false"
+                   spillInstanceId="newrelic-batch-http"
+                   spillReplayIntervalMillis="10000"
+                   maxSpillFileBytes="16777216"
+                   maxTotalSpillBytes="536870912"
+                   minFreeDiskBytes="268435456"
+                   spillOnOverflow="true"
+                   spillFormat="BINARY"
+                   spillRecoveryMode="ADOPT"
+                   spillStartupReconcile="true"
+                   spillBacklogOrder="DUAL_STREAM"
+                   spillReplayThreads="2"
+                   spillReplayMaxBytesPerSec="0">
+            <!-- Compression above — a DELIBERATE divergence from the library default:
+                   gzip               the library defaults this to TRUE, which is the right
+                                      production setting; this app overrides it to FALSE on
+                                      purpose. The stock <Http> appender in the A/B sibling
+                                      (newrelic-stock-http) has no compression option at all,
+                                      so leaving gzip on would vary two things at once —
+                                      batching AND compression — and a bytes-on-the-wire
+                                      comparison would no longer be apples to apples. A real
+                                      deployment should leave compression on (simply omit the
+                                      attribute); New Relic's 1 MB payload limit applies to the
+                                      body AS SENT, so gzip buys real headroom there. The
+                                      engine's own maxBatchBytes ceiling is uncompressed
+                                      either way. -->
+            <!-- Disk spill above — a DELIBERATE divergence from the library default:
+                   spillEnabled       the library defaults this to TRUE, which is the right
+                                      production setting; this app overrides it to FALSE on
+                                      purpose. The spill buffer runs a replay driver thread that
+                                      polls on an interval, adds up to spillReplayThreads
+                                      transient workers during a replay pass, and does disk I/O
+                                      on the failure and overflow paths. On a 0.1 vCore worker —
+                                      more so on a CloudHub 2.0 replica capped near 0.28-0.4
+                                      vCPU — those compete for the same core that serves
+                                      requests, so leaving spill on would make this A/B measure
+                                      batching PLUS durability machinery. A real deployment
+                                      should leave it on (simply omit the attribute).
+                                      CONSEQUENCE, overflow reverts to dropping: spillOnOverflow
+                                      only takes effect when spill is enabled, so a record the
+                                      queue cannot accept is now discarded per overflowPolicy
+                                      (DROP_NEWEST). For THIS app the overload signal is
+                                      therefore `dropped` in the stats heartbeat; under the
+                                      library default it would be `spilledRecords` instead. -->
+            <!-- Queue sizing above:
+                   queueCapacity      25000, down from 100000. At roughly 2 KB retained per
+                                      record, 100000 was on the order of 200 MB of heap — a lot
+                                      on a fractional-vCore worker. 25000 is about 50 MB and
+                                      still tens of seconds of buffer at the rates this app
+                                      sustains. With spill off it is also the whole buffer:
+                                      past it, records are dropped rather than parked on disk. -->
+            <!-- Diagnostics knobs above:
+                   diagnosticsLevel    floor for the appender's OWN health messages, written to
+                                       Log4j2's StatusLogger (out-of-band, never re-shipped):
+                                       WARN (default) = only failures (dropped/rejected batches,
+                                       queue overflow); INFO = also the periodic stats heartbeat.
+                                       Capped by the <Configuration status="..."> level above.
+                   statsIntervalMillis emit a one-line delivery snapshot every N ms
+                                       (accepted/sent/dropped/failed/queueDepth + spill totals);
+                                       0 disables. 60000 here = a once-a-minute heartbeat so
+                                       "is it still shipping?" is a log read, not a guess. -->
+            <!-- Crash-resilience knobs above — every one of them INERT while spillEnabled is
+                 false. Kept, not deleted: this file is exhaustive by design, these lines are
+                 where the library's spill surface is documented, and the sizing below was chosen
+                 for a fractional-vCore worker. Keeping them makes re-enabling durability a
+                 one-word edit instead of a rediscovery.
+                   spillInstanceId        id embedded in each spill file name (spill-<id>-<seq>.log)
+                                          so co-located apps sharing a spill dir never overwrite
+                                          each other's logs; defaults to the appender name
+                   spillFormat            BINARY (compact TLV, default) | JSON (human-readable)
+                   spillRecoveryMode      ADOPT replays orphaned files from a previous run |
+                                          IGNORE leaves them | DELETE discards them at startup
+                   spillStartupReconcile  on startup, evict oldest files to satisfy the size cap
+                                          and free-disk floor before writing new logs
+                   spillBacklogOrder      DUAL_STREAM ships newest logs and the historical
+                                          backlog in parallel | OLDEST_FIRST | NEWEST_FIRST
+                   spillReplayThreads     parallel replay workers (forced to 2 for DUAL_STREAM)
+                   spillReplayMaxBytesPerSec  throttle backlog drain (0 = unlimited) -->
+            <!-- Ingest-lag knob above:
+                   includeTimestamp   false omits New Relic's reserved `timestamp` attribute, so
+                                      New Relic stamps each log with its ARRIVAL time. Supplying
+                                      `timestamp` would make the stored time equal the generation
+                                      time, which hides shipping delay by construction. The stock
+                                      sibling omits it too (its layout has no `timestamp` key), so
+                                      lag is measured the same way on both sides of the A/B. -->
+            <!-- Vendor layout: prepend New Relic's "logtype" classifier and the `platform` facet,
+                 then collapse the flow's pretty JSON to ONE line.
+                 `platform` (from the property above) is emitted from the LAYOUT rather than as an
+                 appender attribute because the layout is the one mechanism both appenders share:
+                 here its output becomes the `message` the sink ships and New Relic parses back
+                 into attributes, while in the stock sibling that same output IS the request body.
+                 Both halves therefore land the identical facet, which is what keeps the pair
+                 field-for-field comparable. It collides with nothing New Relic restricts
+                 (message, timestamp, level, accountId, appId, eventType, entity.*) nor with the
+                 specially-treated `hostname`/`service`, nor with any key the flow emits.
+                 logtype="mule" is New Relic's documented counterpart to Datadog's `ddsource`
+                 (https://docs.newrelic.com/docs/logs/get-started/logging-best-practices) — a
+                 well-known attribute that selects built-in parsing rules and feeds New Relic's
+                 log-summary dashboards. It matches the `source="mule"` the Datadog demos set on
+                 their appender. Emitted from the layout because <BatchHttp> has no logtype
+                 attribute; New Relic parses it out of the message JSON on ingest either way.
+                 The leading brace here re-opens the object whose own brace %replace strips
+                 (\x7B, the hex escape keeps Log4j2's %replace brace-counting from miscounting);
+                 together with the newline+indent collapse that yields one valid single-line JSON
+                 object (not one event per field). This cannot use a nested %replace: Log4j2's
+                 option parser splits on braces and rejects it.
+                 `generatedAt` is NOT set here: the flow emits it in its own JSON message (see
+                 app.xml), so it records when the business EVENT occurred rather than when Log4j2
+                 appended it, and it survives any appender or layout change. Comparing it against
+                 the arrival time New Relic now stamps is what makes ingest lag visible.
+                 Level/logger/thread are ALSO shipped as discrete envelope attributes by the
+                 sink, independent of this pattern.
+                 NOTE: a charset="..." attribute on this layout would have NO effect —
+                 <BatchHttp> takes the rendered text and ships UTF-8 JSON regardless. (The
+                 stock <Http> appender differs: there the layout charset sets the wire bytes.) -->
+            <PatternLayout pattern="{&quot;logtype&quot;:&quot;mule&quot;,&quot;platform&quot;:&quot;${app.platform}&quot;,%replace{%m}{^\x7B\s*|[\r\n]+\s*}{}"/>
+        </BatchHttp>
+    </Appenders>
+
+    <!-- Logger layout mirrors the CloudHub 1.0 reference at
+         https://docs.mulesoft.com/cloudhub/custom-log-appender : an async root
+         (CloudHub requires async appenders) plus the same framework noise-reduction
+         categories the doc ships, so platform/library logs don't drown the app logs.
+         The one demo-specific addition is the application logger below, which ALSO
+         ships to the New Relic appender. -->
+    <Loggers>
+        <!-- Application logs: ship to New Relic AND the local file. -->
+        <AsyncLogger name="com.mulesoft.support.batchhttp.muledemo" level="INFO" additivity="false">
+            <AppenderRef ref="newrelic"/>
+            <AppenderRef ref="FILE"/>
+        </AsyncLogger>
+
+        <!-- Framework noise-reduction categories, copied from the CloudHub doc. -->
+        <AsyncLogger name="com.gigaspaces" level="ERROR"/>
+        <AsyncLogger name="com.j_spaces" level="ERROR"/>
+        <AsyncLogger name="com.sun.jini" level="ERROR"/>
+        <AsyncLogger name="net.jini" level="ERROR"/>
+        <AsyncLogger name="org.apache" level="WARN"/>
+        <AsyncLogger name="org.apache.cxf" level="WARN"/>
+        <AsyncLogger name="org.springframework.beans.factory" level="WARN"/>
+        <AsyncLogger name="org.mule" level="INFO"/>
+        <AsyncLogger name="com.mulesoft" level="INFO"/>
+        <AsyncLogger name="org.jetel" level="WARN"/>
+        <AsyncLogger name="Tracking" level="WARN"/>
+
+        <!-- Root carries the FILE appender ONLY: framework logs (and anything not explicitly
+             listed above) keep landing in the CloudHub log file, but they are not shipped to
+             New Relic. The vendor layout wraps the flow's own JSON message into a JSON object,
+             so a plain-text framework line renders as a malformed document — which the sink
+             would ship as a mangled `message` string, and which the stock sibling's intake
+             rejects outright. Narrowing the vendor path to the application logger is what
+             keeps every shipped record valid JSON.
+             That logger is additivity="false" and names FILE itself, so its events reach the
+             file exactly once and never bubble to root: no double-shipping either way. -->
+        <AsyncRoot level="INFO">
+            <AppenderRef ref="FILE"/>
+        </AsyncRoot>
+    </Loggers>
+</Configuration>

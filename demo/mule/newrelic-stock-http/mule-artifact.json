@@ -1,0 +1,11 @@
+{
+  "minMuleVersion": "4.9.15",
+  "name": "mule-newrelic-stock-http-demo",
+  "requiredProduct": "MULE_EE",
+  "configs": [
+    "app.xml"
+  ],
+  "javaSpecificationVersions": [
+    "17"
+  ]
+}

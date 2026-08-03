@@ -1,0 +1,1197 @@
+# batch-http-appender
+
+A **batching HTTP log shipper** for Java — a fast, drop-in replacement for Log4j2's
+stock `HttpAppender`, which sends one synchronous HTTP request per log event.
+
+Instead, events are enqueued (non-blocking) and shipped in **compressed batches**
+by background threads to **Datadog**, **Splunk HEC**, **New Relic**, **Dynatrace**,
+or any HTTP log intake.
+
+## Why
+
+The default Log4j2 `HttpAppender` does one blocking request per event. At volume,
+per-request overhead (TLS, headers, round-trip latency) dominates and the logging
+call blocks the application thread. Vendor intake APIs are all designed for bulk
+ingest — this library uses them.
+
+### Benchmark (local mock intake, 5 ms simulated latency/request, 5000 events)
+
+| Mode | Wall clock | HTTP requests |
+|------|-----------:|--------------:|
+| naive (1 request/event) | 32634 ms | 5000 |
+| **batched (this lib)** | **82 ms** | **10** |
+
+≈ **400× faster wall-clock, 500× fewer requests.** Reproduce with:
+
+```bash
+mvn install -DskipTests
+cd demo/java/benchmark && mvn exec:java
+```
+
+### Measured on CloudHub (real Datadog and New Relic intake)
+
+Two batch/stock pairs — one shipping to **Datadog**, one to **New Relic** — were deployed to
+**both CloudHub 1.0 and CloudHub 2.0** (0.1 vCore each) and load-tested with
+[`oha`](https://github.com/hatoo/oha) at 5 concurrent connections for 60 s over plain `http`.
+Each request hits `/log?count=15`, emitting **17 log events** (a `batch.start`, 15
+`order.processed`, a `batch.completed`). Each app was primed with a 5-request warmup and a
+10 s pause before the measured run. The two vendors were driven **paired-parallel, one vendor
+per side**: a Datadog app and a New Relic app under load at the same instant, never two apps
+against the same intake, so no vendor's intake was ever loaded by two apps at once. All eight
+runs completed the full 60 s at **100% success**. Measured 2026-08-03. **Full report (charts,
+percentiles, config under test):** [`docs/index.html`](docs/index.html) (open it locally after
+cloning).
+
+**Throughput gain, batch versus stock, within each vendor-and-platform pair:**
+
+| Platform | Datadog | New Relic |
+|----------|--------:|----------:|
+| CloudHub 1.0 — 0.1 vCore worker | **15.97×** | **18.14×** |
+| CloudHub 2.0 — 0.1 vCore replica | **1.19×** | **3.82×** |
+
+**16–18× on CloudHub 1.0 for both vendors, 1.2–3.8× on CloudHub 2.0.** The vendor barely
+matters; the platform does. The likely explanation is that a CPU-capped CloudHub 2.0 replica
+is bottlenecked *upstream* of the appender — the cap, not the log shipping, sets the ceiling —
+while a CloudHub 1.0 worker leaves headroom that a synchronous appender cannot use and a
+batching one can. That is offered as the explanation the pattern fits, not as something these
+runs measured.
+
+**CloudHub 1.0** — 0.1 vCore worker. Load windows `13:57:34Z–13:58:34Z` (batch pair) and
+`13:59:48Z–14:00:48Z` (stock pair):
+
+| App | req/s | Requests | Mean | p50 | p90 | p99 |
+|-----|------:|---------:|-----:|----:|----:|----:|
+| **Datadog — batch 0.1.3** | **99.54** | **5,968** | **50 ms** | **35 ms** | **79 ms** | **235 ms** |
+| Datadog — stock `<Http>` | 6.23 | 369 | 774 ms | 115 ms | 2,460 ms | 9,492 ms |
+| **New Relic — batch 0.1.3** | **84.96** | **5,093** | **59 ms** | **35 ms** | **101 ms** | **265 ms** |
+| New Relic — stock `<Http>` | 4.68 | 276 | 893 ms | 109 ms | 238 ms | 19,627 ms |
+
+**CloudHub 2.0** — 0.1 vCore replica. Load windows `13:49:58Z–13:50:58Z` (batch pair) and
+`13:51:21Z–13:52:22Z` (stock pair):
+
+| App | req/s | Requests | Mean | p50 | p90 | p99 |
+|-----|------:|---------:|-----:|----:|----:|----:|
+| **Datadog — batch 0.1.3** | **21.27** | **1,272** | **236 ms** | **204 ms** | **390 ms** | **678 ms** |
+| Datadog — stock `<Http>` | 17.86 | 1,067 | 281 ms | 229 ms | 471 ms | 1,105 ms |
+| **New Relic — batch 0.1.3** | **16.44** | **982** | **304 ms** | **275 ms** | **485 ms** | **1,474 ms** |
+| New Relic — stock `<Http>` | 4.30 | 253 | 1,028 ms | 346 ms | 1,009 ms | 22,036 ms |
+
+Each pair is a batch-versus-stock contrast within one vendor on one platform; the two tables
+are not a controlled comparison of each other (see the caveats below). The stock appender's
+synchronous per-event send holds the request thread for the full round-trip to the intake, so
+under concurrency the worker's small thread pool saturates and its tail latency blows out: on
+three of the four stock runs p99 lands between **9.5 s and 22 s**, against batch p99s of 235 ms
+to 1.5 s. The batch appender enqueues non-blocking, so request latency stays decoupled from
+intake latency. The exception is the CloudHub 2.0 Datadog pair, where the stock run holds a
+p99 of 1,105 ms and both apps sit close together — consistent with both hitting a ceiling that
+is not the appender.
+
+Every run validates against Little's Law — requests/sec × mean latency ≈ the concurrency of
+5 — to within 0.1–16%, so the load parameters are corroborated by the results rather than
+merely asserted. Three runs needed a ×10 latency correction for a known
+[`oha` 1.14.0](https://github.com/hatoo/oha) unit-selection defect, which prints a
+`0.0774 10 sec`-style value where it means `0.774 sec`; the figures above are already
+corrected.
+
+**Read all of this as directional.** Every caveat below ships with the figures:
+
+- **One run per pair, no median.** These are single measurements, not repeated ones. The
+  pattern is directional, not established.
+- **Roughly 2× run-to-run variance has been observed on CloudHub 1.0** across repeated
+  passes. The CloudHub 2.0 Datadog figure of **1.19× is inside that band**, so treat it as
+  directional only — it is not distinguishable from noise on this evidence. The variance is
+  stated as observed; its cause is not established here.
+- **The CloudHub 1.0 workers were freshly deployed with no accumulated burst balance**, so
+  those runs measured baseline CPU rather than burst headroom. That makes 16–18× a **floor**
+  rather than a flattering peak — the opposite of the usual suspicion about burstable workers.
+- **`gzip` and `spillEnabled` were disabled in the demos**, so this measures batching in
+  isolation rather than the appender as it would be deployed. Compression is off precisely
+  because the stock `<Http>` appender cannot compress and leaving it on would vary two things
+  at once; a production deployment should leave both on.
+- **Compare within a plane, not across.** CloudHub 1.0 and 2.0 have different CPU models —
+  burstable versus hard-capped — so the two tables above are not a controlled comparison of
+  each other, whatever else was held constant between them.
+- **Throughput and mean latency are one measurement, not two.** The load is closed-loop
+  (`oha -c 5`, no rate limit), so requests per second is the arithmetic consequence of mean
+  latency, not an independent win. The percentiles are unaffected.
+- **One observed and unexplained artifact.** On both CloudHub 1.0 batch apps, exactly five
+  requests — matching the concurrency — stalled together for several seconds and then
+  recovered (near 4.4 s on the Datadog app, near 6.1 s on the New Relic one), against medians
+  of 35 ms. It is five requests in roughly five thousand and moves neither the medians nor the
+  ratios. Reported as observed; the cause is unexplained.
+
+### Ingest lag: generation → arrival in Datadog
+
+The clearest real-world symptom of synchronous per-event shipping is **ingest lag** —
+the gap between when the app *generated* an event and when Datadog actually *received*
+it. Each event carries a `generatedAt` field (UTC ISO-8601, emitted by the demo flow
+itself in its own JSON message — see each app's `app.xml` — so it records when the
+business event occurred and survives any appender or layout change);
+Datadog stamps its own receipt time. **The larger the gap, the further behind the
+appender is falling** — and under load, the stock appender's one-blocking-POST-per-event
+backs up while the batch appender ships promptly.
+
+Same load on both apps, captured from the Datadog CloudHub 2.0 pair during an **earlier
+session** than the runs tabulated above (displayed times are the deployment's local time,
+UTC+10):
+
+**Batch `<BatchHttp>` — negligible lag.** `generatedAt` `…T23:27:09.999Z` arrives at
+`09:27:09.999` local (= `23:27:09.999Z`) — the same instant, sub-second:
+
+![Datadog batch app: generatedAt equals ingest time — near-zero lag](docs/img/datadog-batch-ingest-lag.png)
+
+**Stock `HttpAppender` — minutes behind.** `generatedAt` `…T23:26:11.753Z` isn't
+received until `09:29:14.813` local (= `23:29:14.813Z`) — a **~3-minute** backlog as the
+synchronous sends queue up behind each other:
+
+![Datadog stock app: ingest time trails generatedAt by ~3 minutes](docs/img/datadog-stock-ingest-lag.png)
+
+That backlog is also a **volume** gap. Both counts below come from one Datadog query window
+covering both apps, but that window is **wider than any 60 s measured run** and belongs to
+that same earlier session, so neither total reconciles with the request counts in the tables
+above: it spans warmups, measured minutes, and the backlog draining afterwards rather than one
+measured minute. Over that window the batch app delivered **84.7K** events to Datadog while the
+stock app managed only **5.66K** — it simply can't drain events as fast as they're produced:
+
+![Datadog log counts: 84.7K batch vs 5.66K stock over one query window spanning the session](docs/img/datadog-log-volume-batch-vs-stock.png)
+
+## Architecture
+
+```mermaid
+flowchart TD
+    App["App / Log4j2"] -->|log event| Adapter["BatchHttpAppender<br/>(Log4j2 adapter)"]
+    Adapter -->|enqueue| Shipper["BatchingLogShipper<br/>(engine)"]
+
+    subgraph core["batch-http-core — zero runtime deps"]
+        Shipper --> Queue["Bounded in-memory queue<br/>non-blocking offer"]
+        Queue --> Flush{"Flush trigger?<br/>max records &bull; max bytes &bull; linger time"}
+        Flush -->|not yet| Queue
+        Flush -->|batch ready| Sink["LogSink<br/>Datadog / Splunk / New Relic / Dynatrace / Generic"]
+        Sink --> Transport["HttpTransport<br/>JDK HttpClient &bull; gzip &bull; retry + backoff"]
+
+        Queue -.->|queue full &amp; spillOnOverflow| Spill[("SpillStore<br/>disk segment files")]
+        Transport -.->|retries exhausted| Spill
+        Spill -.->|background drain| Replayer["SpillReplayer"]
+        Replayer -.->|resend| Transport
+    end
+
+    Transport -->|HTTPS bulk POST| Intake[("Vendor intake API")]
+```
+
+The dotted path is the **crash-resilient disk buffer** (`spillEnabled`, **on by default**):
+when the in-memory queue overflows or a batch exhausts its HTTP retries, records are written
+to disk as `SpillStore` segment files instead of being dropped, and a background
+`SpillReplayer` drains them back through the same transport once the endpoint recovers.
+Because it is on by default it also writes to local storage by default — see
+"Disk-spill buffer" for where, and when to turn it off.
+
+- **`batch-http-core`** — framework-agnostic engine. **Zero runtime dependencies**
+  (uses the JDK 11+ `HttpClient`). Contains the queue, batching triggers, retry,
+  gzip, lifecycle, and the per-vendor `LogSink` implementations.
+- **`batch-http-log4j2`** — the `@Plugin`-annotated `BatchHttpAppender`, usable
+  directly from `log4j2.xml`.
+- **`demo/java/benchmark`** — runnable benchmark + example `log4j2-example.xml`
+  (artifactId `batch-http-demo`).
+
+## Build & install locally
+
+**Prerequisites:** JDK 17+ and Maven 3.8+ (`java -version`, `mvn -version`).
+
+The project is a Maven multi-module reactor (`groupId` `com.mulesoft.support.batchhttp`, version
+`0.1.3`). To build everything and install the artifacts into your local
+Maven repository (`~/.m2/repository`) so other projects can depend on them:
+
+```bash
+git clone https://github.com/mulesoft/batch-http-log-appender.git
+cd batch-http-log-appender
+mvn clean install
+```
+
+This compiles all modules, runs the unit + end-to-end tests, and installs the
+jars locally. To skip tests for a faster install:
+
+```bash
+mvn clean install -DskipTests
+```
+
+To build and install **only the appender and its engine** (no examples):
+
+```bash
+mvn -pl batch-http-core,batch-http-log4j2 -am clean install
+```
+
+After install, the artifacts are available to other builds as:
+
+```xml
+<dependency>
+    <groupId>com.mulesoft.support.batchhttp</groupId>
+    <artifactId>batch-http-log4j2</artifactId>
+    <version>0.1.3</version>
+</dependency>
+```
+
+(`batch-http-log4j2` transitively brings in `batch-http-core`. The core jar has
+**no runtime dependencies** beyond the JDK.)
+
+### Verify the build
+
+```bash
+mvn test                 # run all unit + end-to-end tests
+mvn -pl batch-http-core dependency:tree   # confirm core has zero runtime deps
+```
+
+### Dependency hygiene & CVE scanning
+
+Keeping third-party dependencies current and free of known CVEs is a project requirement,
+not an afterthought. The surface is deliberately tiny — `batch-http-core` has **zero** runtime
+dependencies, and `batch-http-log4j2` compiles against log4j 2.x (which the Mule runtime
+provides, so it is excluded at runtime). All versions are pinned in the parent POM.
+
+```bash
+# What's stale? Reports any dependency or plugin with a newer release.
+mvn versions:display-dependency-updates
+mvn versions:display-plugin-updates
+
+# CVE gate: OWASP dependency-check against the NVD over the whole reactor.
+# Fails the build on any dependency with CVSS >= 7 (high/critical).
+mvn -Psecurity verify
+```
+
+The `security` profile is opt-in because a full NVD scan is slow and benefits from an
+[NVD API key](https://nvd.nist.gov/developers/request-an-api-key) (`-Dnvd.api.key=…`); wire
+`mvn -Psecurity verify` into CI (nightly or pre-release) rather than every local build. Stay on
+the **log4j 2.x** line — a 3.x bump would diverge from the log4j the Mule runtime actually
+supplies. Accepted/false-positive findings go in a `dependency-check-suppressions.xml`.
+
+### Run the benchmark / example
+
+```bash
+mvn install -DskipTests
+cd demo/java/benchmark && mvn exec:java
+```
+
+### Using it from a Mule app
+
+The `demo/mule/newrelic-batch-http` module shows the appender bundled into a Mule 4.9
+application. After `mvn install` (so the appender jars are in your local `.m2`),
+build the Mule app — the `mule-maven-plugin` bundles the appender into the app so
+Mule's app classloader can discover the `<BatchHttp>` plugin at startup:
+
+```bash
+cd demo/mule/newrelic-batch-http && mvn clean package
+```
+
+Set the New Relic key at runtime (it is **not** committed) via an env var or JVM
+arg, then deploy the resulting `target/*-mule-application.jar`:
+
+```bash
+export NEW_RELIC_API_KEY=YOUR_NEW_RELIC_INGEST_KEY
+```
+
+#### Measuring the batching impact (A/B control)
+
+The `demo/mule/newrelic-stock-http` module is a **control sibling** of
+`demo/mule/newrelic-batch-http`: the same Mule app and workload, but wired to Log4j2's **stock
+`<Http>` appender** (one synchronous POST per event) instead of `<BatchHttp>`. Run both
+side-by-side (ports 8081 vs 8082) against a local mock intake and compare request counts
+and wall-clock to quantify the batching speedup. See that module's README for the
+step-by-step measurement guide and a ready-to-run mock.
+
+Note that **both batch demo apps deliberately override three library defaults**, in each case
+to keep the A/B varying only the appender:
+
+- **`gzip="false"`** (library default `true`). The stock `<Http>` appender has no compression
+  option, so leaving gzip on would make the pair differ by batching *and* compression.
+- **`spillEnabled="false"`** (library default `true`). The disk-spill buffer runs a replay
+  driver thread, adds transient replay workers, and does disk I/O on the failure and overflow
+  paths — real competitors for a 0.1 vCore worker or a CPU-capped CloudHub 2.0 replica, and
+  machinery the stock appender has no equivalent of. With it off, the batch demos also revert
+  to dropping on queue overflow, so **`dropped` is their overload signal, not
+  `spilledRecords`** — the reverse of the library default described under "Disk-spill buffer"
+  below. Every other `spill*` attribute stays in those files but is inert.
+- **`includeTimestamp="false"`** (library default `true`). This one is not about the stock
+  appender's capabilities but about what stays observable: with the vendor's reserved
+  event-time field omitted, the vendor stamps each record with its own *arrival* time, so
+  `arrival − generatedAt` is the ingest lag. Supply the field and the stored timestamp equals
+  the generation time, hiding shipping delay by construction. The stock siblings omit it the
+  same way — their layouts carry no such key — so both halves are measured identically.
+
+The first two are the right production settings — a real deployment should leave compression
+and spill on — so treat them as separate measurements rather than properties of these demos.
+The third is a measurement decision either way: a production app usually *wants* its own
+event time.
+
+#### Datadog flavor of the same pair
+
+The `demo/mule/datadog-batch-http` and `demo/mule/datadog-stock-http` modules are the **Datadog
+counterparts** of the New Relic pair above — the same flow shape and workload, shipping instead
+to the Datadog Logs intake (`/api/v2/logs`). The two pairs are not byte-identical to each other:
+the New Relic flows lead each event with an extra `message` summary key, because that vendor's
+Logs UI parses a JSON `message` and shows nothing without one. Within a pair the flow *is*
+identical, which is what the A/B needs. `datadog-batch-http` (port
+8083) uses `<BatchHttp vendor="datadog">`; its stock-`<Http>` control sibling
+`datadog-stock-http` (port 8084) sends one POST per event. All four Mule demos
+use distinct ports (8081–8084) so they can run at once. See each module's README for
+build, key injection (`DD_API_KEY` / `-Ddatadog.apiKey`), and the A/B measurement guide.
+
+#### Splitting CloudHub 1.0 from CloudHub 2.0
+
+All four demos emit a **`platform`** attribute on every event, so a pair deployed to both
+CloudHub generations stays separable in the log backend. The two facets have one job each and
+should not be swapped: **`service` identifies the app** (batch versus stock) and **`platform`
+identifies the plane** (CloudHub 1.0 versus 2.0). Both are overridable — `service` with
+`-Dapp.service=...`, defaulting to each app's own name, and `platform` as below — and for both, an
+override you no longer want must be **deleted, not cleared**: Log4j2 honours a `:-` default only
+when the property is *absent*, so a present-but-empty value wins and blanks the facet. Overloading
+`service` with a plane name and then clearing it is precisely how the `SERVICE` column once went
+empty for a whole run, and `platform` exists so there is no reason to overload it again.
+
+Set the plane per deployment with `-Dapp.platform=cloudhub-1.0` or
+`APP_PLATFORM=cloudhub-2.0`; unset it reads `unspecified` rather than guessing. Both lookup keys
+are namespaced because `sys:` and `env:` are shared with whatever the container already defines —
+a bare `PLATFORM` is a plausible base-image variable and would silently shadow the facet. The
+emitted attribute stays `platform`. It must be set on **both** apps of a pair to be useful — a
+value on one half only makes the pair look like a comparison of two platforms. This is a demo
+convenience, not a library feature: a `<Properties>` entry plus one field in each app's
+`<PatternLayout>`, which is the one mechanism `<BatchHttp>` and the stock `<Http>` appender share.
+
+**The scripted CloudHub 1.0 deploy does not set this facet.** `scripts/deploy-ch1.sh` passes a
+single `--property` — the vendor API key — so an app deployed through it reports
+`platform: unspecified` until you add `app.platform` by hand in the Runtime Manager **Properties**
+tab (CloudHub 1.0 surfaces those as JVM system properties) and restart. Do that for both halves of
+the pair before a benchmark run, or the CH1 side of the comparison arrives unlabelled.
+
+## Usage (log4j2.xml)
+
+```xml
+<Configuration status="WARN" packages="com.mulesoft.support.batchhttp.log4j2">
+    <Appenders>
+        <BatchHttp name="datadog" vendor="datadog"
+                   apiKey="${env:DD_API_KEY}" service="orders-api" source="java"
+                   maxBatchRecords="500" lingerMillis="1000" gzip="true">
+            <PatternLayout pattern="%m"/>
+        </BatchHttp>
+    </Appenders>
+    <Loggers>
+        <!-- Your application's logs. additivity="false" keeps them from also
+             bubbling to the root below, so they ship to the appender exactly once. -->
+        <AsyncLogger name="com.example.orders" level="INFO" additivity="false">
+            <AppenderRef ref="datadog"/>
+        </AsyncLogger>
+
+        <!-- Root ships everything else (framework + libraries) to the appender too. -->
+        <AsyncRoot level="INFO">
+            <AppenderRef ref="datadog"/>
+        </AsyncRoot>
+    </Loggers>
+</Configuration>
+```
+
+> **The `packages` attribute is required.** Log4j2 only recognizes the custom
+> `<BatchHttp>` element if its `<Configuration>` carries
+> `packages="com.mulesoft.support.batchhttp.log4j2"` so the plugin package is scanned.
+> Omit it and Log4j2 silently ignores the appender (you'll see a startup warning that
+> `BatchHttp` is unknown, and no logs ship). This is needed wherever the library is on
+> the application classloader rather than the Log4j2 boot classpath — which includes
+> **every Mule 4 / CloudHub app**. Log4j2 2.x additionally emits its own `WARN` that
+> "the use of package scanning to locate Log4j plugins is deprecated"; keep the attribute
+> anyway — that warning is about the mechanism, and without it the container's Log4j2 does
+> not resolve a plugin that lives on the app classloader.
+
+> **Two loggers, one appender-ref each.** A dedicated `<AsyncLogger>` for your application
+> package with `additivity="false"` ships your logs to the appender exactly once, and the
+> `<AsyncRoot>` catches everything else (framework + libraries) so the whole app is shipped.
+> Without `additivity="false"` the app logger's events would be handled *and* also bubble to
+> root — double-shipping every app log. If you only want your own logs shipped, drop the
+> `<AsyncRoot>` appender-ref (or keep root local-only). The Mule demos in this repo do exactly
+> that: their root carries the file appender alone, because their layout wraps the flow's JSON
+> message and a plain-text framework line would render as an invalid document.
+
+> **`<AsyncRoot>`/`<AsyncLogger>` vs `<Root>`/`<Logger>`.** The async variants hand the logging
+> call off to Log4j2's background thread so it never touches the application thread — but they
+> **require the LMAX Disruptor on the classpath** (`com.lmax:disruptor`). The **Mule runtime
+> already provides it**, but a standalone Java app must add that dependency or Log4j2 logs an
+> error and falls back to sync. If you'd rather not add it, use the plain `<Root>`/`<Logger>`
+> elements instead: `<BatchHttp>` is *already* non-blocking — it enqueues each event to a
+> bounded in-memory queue and returns immediately — so synchronous loggers still never block
+> your app threads on network I/O.
+
+<!-- -->
+
+> **The layout renders the message; its `charset` attribute does not apply.** `<BatchHttp>`
+> takes the text a `StringLayout` (`<PatternLayout>` and the JSON/CSV layouts) has already
+> rendered and ships it as **UTF-8 JSON**, so a `charset` set on the layout has no effect on
+> what goes on the wire. This differs from Log4j2's stock `HttpAppender`, where the layout's
+> charset *does* govern the request bytes — when porting a config from it, drop the attribute
+> rather than expecting it to change the request encoding. Multi-byte content (accents, CJK,
+> emoji) is preserved regardless of what the layout declares.
+
+### Injecting secrets (API keys / tokens)
+
+`log4j2.xml` is parsed by **Log4j2's own property resolver, not by Mule** (or Spring, or
+any host framework). Two consequences that trip people up:
+
+- **Mule `${...}` placeholders do *not* work here.** A `secure::` property or an
+  `${api.key}` from a Mule property file will arrive as the literal string. Use a
+  **Log4j2 lookup** instead — `${sys:...}` for a JVM system property or `${env:...}` for
+  an environment variable:
+
+  ```xml
+  apiKey="${sys:datadog.apiKey:-${env:DD_API_KEY:-MISSING_KEY}}"
+  ```
+
+  The `:-` chains fallbacks left to right and ends in a visible sentinel, so a missing
+  secret surfaces as an obvious `MISSING_KEY` rather than an empty header.
+
+- **On CloudHub, map the secret to a `-D` JVM argument.** A CloudHub *application
+  property* is a Mule property and is invisible to Log4j2; set the value as a JVM system
+  property (e.g. `-Ddatadog.apiKey=…` via the runtime's JVM args / wrapper) so the
+  `${sys:...}` lookup resolves it. The `apiKey`/`token` attributes are marked
+  `sensitive`, so Log4j2 masks them in its own status/debug output.
+
+### Per-vendor examples
+
+A full multi-vendor file is at
+[`demo/java/benchmark/src/main/resources/log4j2-example.xml`](demo/java/benchmark/src/main/resources/log4j2-example.xml).
+Each `<BatchHttp>` below goes inside `<Appenders>`; reference it from a logger as usual.
+
+**Datadog** — `site` is the log-intake host for the site your organization lives in (the sink
+appends `/api/v2/logs`); leave it unset to use the sink's default. Datadog publishes the host
+for each of its sites, and the set changes over time, so take the value from
+[their documentation](https://docs.datadoghq.com/getting_started/site/) rather than from here.
+`host` is Datadog's reserved host facet and `service` its reserved service attribute; both are
+optional and omitted when unset:
+
+```xml
+<BatchHttp name="datadog" vendor="datadog"
+           site="${env:DD_SITE}"
+           apiKey="${env:DD_API_KEY}" service="orders-api" host="${env:HOSTNAME}" source="java"
+           maxBatchRecords="500" lingerMillis="1000" gzip="true">
+    <PatternLayout pattern="%m"/>
+</BatchHttp>
+```
+
+**Splunk HEC** — `url` is the HEC base URL (the sink appends
+`/services/collector/event`); auth is `Authorization: Splunk <token>`:
+
+```xml
+<BatchHttp name="splunk" vendor="splunk"
+           url="https://hec.example.com:8088"
+           token="${env:SPLUNK_HEC_TOKEN}"
+           index="main" sourcetype="mulesoft:app" host="prod-app-01"
+           lingerMillis="1000" gzip="true">
+    <PatternLayout pattern="%m"/>
+</BatchHttp>
+```
+
+**New Relic** — `host` is the Log API host for your account's data centre; leave it unset to
+use the sink's default, or take the value for your region from
+[New Relic's documentation](https://docs.newrelic.com/docs/logs/log-api/introduction-log-api/).
+`apiKey` is a license/ingest key sent as `Api-Key`. Optional identity facets: `hostname` is New
+Relic's **reserved** host attribute (its Logs UI surfaces it — distinct from `host`, which only
+picks the intake endpoint), and `service` is a plain, NRQL-queryable attribute. Both are
+omitted when unset:
+
+```xml
+<BatchHttp name="newrelic" vendor="newrelic"
+           host="${env:NEW_RELIC_LOG_HOST}"
+           apiKey="${env:NEW_RELIC_LICENSE_KEY}"
+           service="orders-api" hostname="${env:HOSTNAME}"
+           lingerMillis="1000" gzip="true">
+    <PatternLayout pattern="%m"/>
+</BatchHttp>
+```
+
+**Generic HTTP intake** — any other endpoint (Elasticsearch-ish, Loki HTTP, an in-house
+collector). `apiKey`, when set, is sent as `Authorization: Bearer <apiKey>`:
+
+```xml
+<BatchHttp name="generic" vendor="generic"
+           url="https://logs.internal.example.com/ingest"
+           apiKey="${env:INTERNAL_LOG_TOKEN}"
+           lingerMillis="500" gzip="true">
+    <PatternLayout pattern="%m"/>
+</BatchHttp>
+```
+
+The generic sink defaults to **NDJSON** framing (`Content-Type: application/x-ndjson`,
+one JSON object per line) and, when `apiKey` is set, sends it as
+`Authorization: Bearer <apiKey>`. A few of its knobs are **builder-only** — they have
+no `<BatchHttp>` XML attribute and are reachable only when you embed the engine
+programmatically via `GenericNdjsonSink.builder()`:
+
+| Builder method | Default | Purpose |
+|----------------|---------|---------|
+| `framing(Framing)` | `NDJSON` | `NDJSON` (newline-delimited) or `JSON_ARRAY` (one JSON array body). `JSON_ARRAY` also switches the default `Content-Type` to `application/json` |
+| `maxRecords(int)` | 500 | per-batch record ceiling advertised to the engine (the sink's own `Limits`, distinct from the engine's `maxBatchRecords`) |
+| `maxBytes(int)` | 1 MiB | per-batch uncompressed-byte ceiling advertised to the engine |
+| `header(String, String)` | — | add an arbitrary request header (e.g. a non-Bearer auth scheme, a tenant id); call repeatedly for several. `Content-Type` is defaulted from the framing unless you set it explicitly |
+
+```java
+LogSink sink = GenericNdjsonSink.builder()
+        .url("https://logs.internal.example.com/bulk")
+        .framing(GenericNdjsonSink.Framing.JSON_ARRAY)   // send one JSON array instead of NDJSON
+        .header("X-Scope-OrgID", "team-42")              // custom header the XML appender can't set
+        .maxRecords(1000)
+        .build();
+```
+
+For **Dynatrace**, `url` is your environment URL — the SaaS or ActiveGate base URL
+Dynatrace publishes for the environment — and `token` is an access token with the
+`logs.ingest` scope:
+
+```xml
+<BatchHttp name="dynatrace" vendor="dynatrace"
+           url="${env:DT_ENVIRONMENT_URL}"
+           token="${env:DT_API_TOKEN}" source="mule"
+           maxBatchRecords="500" lingerMillis="1000" gzip="true"/>
+```
+
+The Dynatrace sink POSTs a JSON array to `/api/v2/logs/ingest` with the
+`Authorization: Api-Token <token>` header. It maps the message to the reserved
+`content` attribute, the level to `loglevel`, and the event time to `timestamp`
+as an ISO-8601 UTC instant; everything else (logger, thread, MDC entries, stack
+traces) rides along as attributes.
+
+### Key configuration attributes
+
+| Attribute | Default | Meaning |
+|-----------|---------|---------|
+| `vendor` | `generic` | `datadog` \| `splunk` \| `newrelic` \| `dynatrace` \| `generic` |
+| `maxBatchRecords` | 200 | flush when batch reaches this many records |
+| `maxBatchBytes` | 1 MiB | flush when the estimated body reaches this size. The estimate counts true **UTF-8 bytes**, so a non-Latin batch (CJK, emoji) is measured the way the intake will measure it rather than undercounted by character count |
+| `lingerMillis` | 1000 | flush a partial batch once its oldest record reaches this age. The window opens when the first record of a batch arrives and is not extended by later ones, so under a steady stream a partial batch still ships every interval rather than waiting for a lull |
+| `queueCapacity` | 10000 | bounded in-memory queue size. Sized to bound worst-case heap on a fractional-vCore worker; raise it for high-throughput apps on larger heaps |
+| `overflowPolicy` | `DROP_NEWEST` | `DROP_NEWEST` \| `DROP_OLDEST` \| `BLOCK`. `BLOCK` back-pressures the calling thread until the queue has room, but it waits in bounded steps and re-checks the running flag: once the appender has been stopped, a `BLOCK` offer returns promptly and counts a drop instead of parking the caller indefinitely |
+| `gzip` | true | gzip the request body. Set `false` to send plaintext when you want to read bodies in a proxy or mock intake, or to keep a benchmark comparable against an appender that cannot compress (both Mule batch demos do this); vendor per-request ceilings are measured uncompressed either way |
+| `maxRetries` | 3 | retries on 5xx/429/408/network errors, with exponential backoff unless the response supplies `Retry-After` |
+| `initialRetryBackoffMillis` | 200 | backoff before the first retry (doubles each attempt); a server-supplied `Retry-After` takes precedence over it |
+| `maxRetryBackoffMillis` | 10000 | ceiling for the wait — applies both to the exponential schedule and to a `Retry-After` value |
+| `requestTimeoutMillis` | 10000 | per-request HTTP timeout |
+| `shutdownDrainTimeoutMillis` | 5000 | max time to drain+flush the queue on stop |
+| `flusherThreads` | 1 | background sender threads |
+| `trustAllCertificates` | false | **insecure.** trust any server TLS certificate (self-signed/unknown CA), per-appender. For an internal collector only. See "TLS" below |
+| `verifyHostName` | true | **insecure when false.** skip TLS hostname verification (Log4j2's attribute name); JVM-global — see the caveat under "TLS" below |
+| `maxMessageBytes` | 32768 (32 KiB) | cap the **retained content** of a single message at this many UTF-8 bytes; longer messages are truncated on a character boundary and a `…[truncated N chars]` marker is appended **on top of** the budget, so the final string runs ~25 bytes over. 0 disables. See "Message size capping" below |
+| `includeStackTrace` | true | render a logged `Throwable` into the record (vendor field varies; see matrix below). Set false to ship message-only |
+| `includeTimestamp` | true | emit the vendor's **reserved event-time** field from the log event's own timestamp — Datadog's `date`, New Relic's `timestamp`. Set false to omit it, which leaves the vendor stamping each record with its own **arrival** time instead, making shipping delay observable (see matrix below). Only the datadog and newrelic sinks read it; splunk, dynatrace and generic always emit their own time field. The default is `true`, so an existing configuration behaves exactly as before |
+| `ignoreExceptions` | true | standard Log4j2 flag: when true, an error inside the appender is logged internally and swallowed; set false to let it propagate to the caller |
+| `diagnosticsLevel` | WARN | verbosity of the appender's **own** health log (written to Log4j2's `StatusLogger`, not back through this appender). `WARN` surfaces dropped batches, fatal (4xx) rejections, and queue overflow; `INFO` adds the stats heartbeat; `DEBUG` adds per-retry chatter. See "Troubleshooting & diagnostics" below |
+| `statsIntervalMillis` | 0 (off) | when > 0, emit a one-line stats heartbeat (`accepted`/`sentRecords`/`dropped`/`queueDepth`/spill) this often, so you can confirm delivery is healthy without inspecting the spill directory. Needs `diagnosticsLevel` `INFO` or finer to show |
+
+> **Default changes — read before upgrading.** Five defaults have moved, and each of them
+> changes the behaviour of an app that upgrades the jar without touching its
+> `log4j2.xml`:
+>
+> | Attribute | Was | Now | What changes for an unconfigured app |
+> |-----------|-----|-----|--------------------------------------|
+> | `maxBatchRecords` | 100 | **200** | half as many requests for the same volume; each body twice the size |
+> | `queueCapacity` (v0.1.1) | 100000 | **10000** | worst-case queue memory drops from tens of MB of `LogRecord`s to a few — comfortable on a large heap either way, but the old default was risky on a 0.1–0.2 vCore CloudHub worker |
+> | `gzip` | false | **true** | bodies are compressed and carry `Content-Encoding: gzip`. A proxy, mock intake, or capture tool that assumed plaintext must decompress |
+> | `spillEnabled` | false | **true** | the app now writes log payloads to local storage on a failure path, and queue overflow diverts to disk instead of being dropped. **Read "Disk-spill buffer" below before upgrading** |
+> | `maxTotalSpillBytes` | 512 MiB | **32 MiB** | the on-disk buffer is bounded far more tightly; `maxSpillFileBytes` drops to 8 MiB with it, so the cap is still four segments |
+>
+> Any value you set explicitly wins, as always — on the `log4j2.xml` path Log4j2's value is
+> what reaches the engine, so an app that already spells these out is unaffected. The Mule
+> demos in this repo are one such case on all five; see "Measuring the batching impact"
+> above for which of their settings are deliberate divergences and why.
+
+<!-- -->
+
+> **Bug fix (v0.1.2):** the background flusher no longer busy-spins. A flusher could
+> pin a CPU core at ~100% while idle once its backlog had drained (it polled the queue
+> with a zero timeout instead of blocking). It now blocks until the next record arrives,
+> so an idle flusher uses ~0% CPU. No configuration change is needed; redeploy with the
+> `0.1.2` artifacts to pick up the fix.
+
+<!-- -->
+
+> **New in v0.1.3 — self-diagnostics:** the appender now reports its own health
+> (dropped batches with the HTTP status, fatal 4xx rejections, queue overflow, spill
+> init failure) via Log4j2's `StatusLogger`, plus an opt-in periodic stats heartbeat.
+> Previously a misconfigured key or an unreachable endpoint failed **silently** — the
+> only signal was logs not arriving. Off by nothing: `WARN`-level health is on by
+> default; set `statsIntervalMillis` for the heartbeat. See "Troubleshooting &
+> diagnostics" below. Also bumps third-party deps to current patched releases (log4j
+> `2.26.0`, JUnit `5.14.4`) and adds an opt-in `-Psecurity` OWASP CVE scan.
+>
+> Also corrects `corruptBytesSkipped`, which reported `0` for a torn trailing frame or a
+> wholly unreadable segment — the two likeliest post-crash shapes. A crash-recovery replay
+> may now report a non-zero value where it previously read zero; nothing regressed, the old
+> number was simply under-reporting, so revisit any alert threshold set against it.
+
+The engine also respects the hard per-request intake limits each sink declares — a record
+count and an uncompressed body size, drawn from that vendor's documented ceilings — and
+flushes before crossing them. A sink's `limits()` is the authoritative statement of what
+it enforces; consult the vendor's own documentation for the currently published ceilings,
+which move. The size half of that check is measured in **UTF-8 bytes**, the same unit the
+intake enforces, so a multi-byte payload is split against the real ceiling rather than a
+character count that would understate it.
+
+### Which attributes apply to which vendor
+
+Connection/auth attributes are vendor-specific; the batching/tuning attributes above
+apply to **all** vendors, with `includeTimestamp` the one exception — it is honoured only
+where the vendor treats the event time as a reserved field it will otherwise stamp itself.
+A `—` means the attribute is ignored for that vendor.
+
+| Attribute | datadog | splunk | newrelic | dynatrace | generic |
+|-----------|---------|--------|----------|-----------|---------|
+| `url` | — | HEC base URL | — | environment URL | endpoint URL |
+| `site` | intake host | — | — | — | — |
+| `host` | reserved facet | `host` field | intake host (per region) | — | — |
+| `hostname` | — | — | reserved facet | — | — |
+| `apiKey` | `DD-API-KEY` | — | `Api-Key` | (token alias) | `Authorization: Bearer` |
+| `token` | — | `Splunk <token>` | — | `Api-Token` | — |
+| `service` | reserved attr | — | attribute | — | — |
+| `source` | `ddsource` | — | — | `log.source` | — |
+| `index` | — | HEC `index` | — | — | — |
+| `sourcetype` | — | HEC `sourcetype` | — | — | — |
+| `includeTimestamp` | gates `date` | — | gates `timestamp` | — | — |
+
+**Where a rendered stack trace lands** (when `includeStackTrace` is true and the event
+carries a `Throwable`): datadog, newrelic and dynatrace emit it as `error.stack`; splunk
+and generic emit it as `exception`.
+
+**Required credential per vendor:** datadog → `apiKey`; splunk → `url` + `token`;
+newrelic → `apiKey`; dynatrace → `url` + `token` (accepts `apiKey` as an alias);
+generic → `url`. A missing required value makes the appender fail to build, and Log4j2's
+`StatusLogger` reports it at startup naming the appender, the vendor, the specific reason,
+and that vendor's full list of required **`log4j2.xml` attribute names** — followed by
+"this appender is disabled and will ship no logs". Listing the XML names is the load-bearing
+part: the sinks use different internal names than the configuration does (`baseUrl` for
+`url`, `apiToken` for `token`), so a raw builder message can cite an attribute that does not
+exist in `log4j2.xml` and that you would never find by grepping your config. The diagnostic
+translates back to the names you actually write, and where a vendor needs two attributes
+(splunk, dynatrace) it lists **both** missing ones rather than stopping at the first. So a
+misconfiguration is visible and diagnosable from the runtime log rather than silently
+dropping logs — provided `status` on `<Configuration>` is not `OFF`, which suppresses this
+report along with every other diagnostic (see "Troubleshooting & diagnostics").
+
+### TLS: trusting a self-signed / internal collector
+
+By default the HTTPS transport does what a browser does — it validates the server's
+certificate chain against the JVM trust store **and** verifies the hostname matches the
+certificate. That is the right default and you should leave it on for any real vendor
+intake (Datadog, Splunk Cloud, New Relic, …), which all present publicly-trusted certs.
+
+Two opt-in escape hatches exist for a **private / internal** collector that presents a
+self-signed or privately-signed certificate (analogous to `curl -k` and to Log4j2's
+own [`SslConfiguration`](https://logging.apache.org/log4j/2.x/manual/appenders/network.html#SslConfiguration)):
+
+| Attribute | Default | Meaning |
+|-----------|---------|---------|
+| `trustAllCertificates` | `false` | trust **any** server certificate — self-signed, expired, unknown CA — skipping chain validation. Applied only to **this appender's** transport (its own trust-all `SSLContext`), so the rest of the JVM keeps normal validation. |
+| `verifyHostName` | `true` | when `false`, skip checking that the certificate's CN/SAN matches the requested host (same name as Log4j2's attribute). |
+
+```xml
+<BatchHttp name="internal" vendor="generic"
+           url="https://collector.internal.example.com/ingest"
+           apiKey="${env:INTERNAL_LOG_TOKEN}"
+           trustAllCertificates="true" verifyHostName="false"
+           lingerMillis="1000" gzip="true">
+    <PatternLayout pattern="%m"/>
+</BatchHttp>
+```
+
+> **Both flags are insecure by design** — they defeat protection against a
+> man-in-the-middle. Turn them on only for a collector you control on a trusted network,
+> and prefer fixing trust properly (import the collector's CA into the JVM trust store)
+> where you can. When either is enabled the appender logs a `WARN` to Log4j2's
+> `StatusLogger` at startup so the weakened posture is visible.
+
+<!-- -->
+
+> **`verifyHostName` caveat (JVM-global).** Unlike chain trust, the JDK
+> `java.net.http.HttpClient` has no per-client hostname-verification toggle — the only
+> lever is the JVM-wide system property `jdk.internal.httpclient.disableHostnameVerification`,
+> which the JDK reads **once**, at the first HTTPS request. The appender sets it when
+> `verifyHostName="false"`, but if any HTTPS traffic ran earlier in the JVM the value is
+> already cached and the appender's change has no effect. For a reliable result, set it as
+> a JVM argument instead — on Mule/CloudHub it must carry the `-M-D` prefix to reach the
+> Mule JVM:
+>
+> ```text
+> -M-Djdk.internal.httpclient.disableHostnameVerification=true
+> ```
+>
+> `trustAllCertificates` has no such caveat; it is fully per-appender. (Client-certificate
+> auth / **mTLS** is not yet supported — see the Roadmap.)
+
+### Message size capping
+
+A single oversized message — a developer dumping an entire HTTP body, a multi-megabyte
+stack of stringified objects, or a runaway loop concatenating into one log line — can
+blow up the in-memory queue, the HTTP request, and a spill segment all at once. To bound
+that blast radius, each message is capped at `maxMessageBytes` UTF-8 bytes (**default
+32 KiB**) when it is enqueued:
+
+- Truncation happens on a **UTF-8 character boundary**, so a multi-byte character is
+  never split into invalid bytes, and a `…[truncated N chars]` marker is appended so the
+  cut is visible downstream rather than silent.
+- The budget applies to the **kept prefix**, not to the result. The marker is appended
+  afterwards, so a truncated message is `maxMessageBytes` plus the marker — about 25
+  bytes over, depending on the digit count in `N`. Size a downstream hard limit with that
+  slack in mind rather than assuming the output is exactly capped.
+- The limit is in **bytes**, not characters, because bytes are what bound memory, the
+  wire payload, and the on-disk frame.
+- It is **cheap even for a pathological message**: a normal log line well under the
+  budget is returned untouched in O(1) (no copy, no re-allocation), and an oversized one
+  is measured by walking code points only up to the budget — it never materializes the
+  full UTF-8 encoding of, say, a 200 MB string just to measure it.
+- Set `maxMessageBytes="0"` to disable capping entirely.
+
+Only the `message` field is capped; structured attributes (MDC/ThreadContext) and the
+rendered stack trace are left as-is.
+
+## Resilience
+
+- **Non-blocking by default** — logging never stalls the app; under overload the
+  configured overflow policy applies.
+- **Retry with exponential backoff + jitter** on retryable failures (429/5xx/408/network).
+  Every other 4xx is terminal and is not retried.
+- **`Retry-After` is honored.** When a retryable response carries the header, the
+  server-supplied delay wins over the computed backoff — a throttled intake knows when its
+  window reopens, and retrying sooner just earns another 429. Both RFC 9110 forms are
+  accepted (delta-seconds and HTTP-date). The value is clamped to `maxRetryBackoffMillis`,
+  so a hostile or absurd delay cannot park a flusher, and an absent, malformed, or
+  already-elapsed value falls back to the exponential schedule.
+- **Graceful shutdown** — `appender.stop()` drains and flushes the queue within
+  `shutdownDrainTimeout`.
+- **Message size capping** — a single oversized message is truncated to
+  `maxMessageBytes` (default 32 KiB) on a character boundary before it can bloat the
+  queue, the request, or a spill segment. See "Message size capping" above.
+- **Disk-spill buffer (on by default)** — batches that fail after retries
+  (or records the queue would drop on overflow) are written to rotating segment
+  files on disk instead of being lost. A background thread re-ships them when the
+  endpoint recovers, and segments left by a previous run/crash are replayed on
+  startup. The buffer is bounded and free-space-aware (drop-oldest eviction), so
+  it never exhausts the filesystem. The binary on-disk format is **corruption-tolerant**:
+  a record damaged by an improperly-closed journal is skipped and replay resumes from
+  the next intact one. Replay is **at-least-once** — a segment that fails partway through
+  is retried whole, so a record that transits the buffer can be delivered twice. See
+  "Disk-spill buffer" below.
+- **Observability** — `BatchingLogShipper.stats()` exposes accepted / dropped /
+  sent / failed counts and queue depth; `spillStats()` exposes spilled / evicted /
+  segment counts — plus `corruptBytesSkipped` (bytes discarded recovering a corrupted
+  journal) — when spill is enabled.
+
+## Disk-spill buffer
+
+A durability safety net that is **on by default** (`spillEnabled`). Records flow through
+the in-memory queue exactly as normal; they are written to disk **only** when (a) a batch
+fails after retries are exhausted, or (b) the in-memory queue would otherwise drop a record
+on overflow. The happy path does **zero** disk I/O.
+
+### It is on by default — read this before upgrading
+
+`spillEnabled` used to default to `false`. It now defaults to `true`, so **an app that
+upgrades the jar without changing its configuration starts writing log payloads to local
+storage.** That is a deliberate trade — buffered logs survive an intake outage instead of
+being dropped — but it is not free, and there are four consequences worth understanding.
+
+**1. Where it writes when you have not said.** With no `spillDirectory`, the engine derives
+one per sink in `BatchingLogShipper.defaultSpillDir`: it reads the JVM's `java.io.tmpdir`
+(falling back to `/tmp` only if the JVM reports none), then appends `batch-http-spill` and a
+filename-safe form of the sink's name. So a Datadog appender ends up in
+`${java.io.tmpdir}/batch-http-spill/Datadog/`, a generic one in something like
+`${java.io.tmpdir}/batch-http-spill/Generic_logs.example.com_/`. On a Mule/CloudHub worker
+`java.io.tmpdir` is the container's temp directory; on Windows it is `%TEMP%\...`. The
+directory is created eagerly at startup, so it exists as soon as the appender does, whether
+or not anything is ever written into it.
+
+**2. On many container platforms `/tmp` is memory-backed, and then "disk" buffer means
+RAM.** Where the temp directory is a `tmpfs` (a common Kubernetes / container-runtime
+default, including some Mule deployment topologies), every byte the spill buffer writes is a
+byte of the container's memory — and it counts against the memory limit that gets the
+container OOM-killed. On a memory-constrained worker that turns a durability feature into an
+out-of-memory risk: the endpoint goes down, the buffer fills with up to `maxTotalSpillBytes`
+of log data, and the pod dies of the thing that was supposed to protect it. If your `/tmp`
+is memory-backed, either point `spillDirectory` at real storage (a mounted volume with a
+real filesystem behind it) or set `spillEnabled="false"` and accept drops on failure:
+
+```xml
+<BatchHttp name="datadog" vendor="datadog" apiKey="${env:DD_API_KEY}"
+           spillDirectory="/var/log/batch-http-spill"/>
+
+<BatchHttp name="datadog" vendor="datadog" apiKey="${env:DD_API_KEY}"
+           spillEnabled="false"/>
+```
+
+**3. It changes what queue overflow means.** `spillOnOverflow` defaults to `true`, so now
+that spill is also on by default, a record the queue would have dropped is **written to disk
+instead of being dropped** — `overflowPolicy` no longer has the last word on an overloaded
+app. The practical consequence is a monitoring one: the `dropped` counter can sit at **zero**
+while the app is badly overloaded, because everything that overflowed went to disk. Under
+the old defaults `dropped` was the overload signal; under these it is **`spilledRecords`**
+(and `segmentCount` / `onDiskBytes` growing in the stats heartbeat). Alert on those.
+
+Which counter to watch follows `spillEnabled`, so decide it per app rather than by habit: with
+spill **on** (the default) alert on `spilledRecords`, and with spill **off** alert on `dropped`,
+because `spillOnOverflow` has no effect and `overflowPolicy` gets the last word again.
+
+**4. Replay is at-least-once, so duplicates are possible.** A segment that ships partway and
+then fails is re-read whole on the next pass, so any record that transits the buffer may be
+delivered more than once after a failure. That is the deliberate trade — duplicates over
+loss — and it is unchanged by this default; what changed is that it now applies to apps that
+never asked for the buffer. See "Replay is at-least-once, not exactly-once" below.
+
+**The staleness trap.** `spillRecoveryMode` defaults to `ADOPT`, which means a spill
+directory left behind by a previous run is **adopted and replayed at startup**. That is the
+right behaviour for a crash a minute ago; it is a trap for a directory that has been sitting
+on a reused host or a restored volume for days. Log intakes reject events whose timestamps
+are too old — Datadog and New Relic both publish a maximum age for accepted logs (on the
+order of hours to a couple of days; take the current window from
+[Datadog's](https://docs.datadoghq.com/logs/log_collection/) and
+[New Relic's](https://docs.newrelic.com/docs/logs/log-api/introduction-log-api/) own
+documentation rather than from here, since these limits change). A backlog older than that
+window is replayed, accepted at the HTTP level, and discarded server-side. The engine sees a
+success and counts those records in `sentRecords` before deleting the segment, so a stale
+backlog can look delivered while nothing of it is searchable in the intake. If a host may
+present a stale spill directory at startup, set
+`spillRecoveryMode="DELETE"` (discard old segments) or `IGNORE` (leave them untouched)
+rather than relying on `ADOPT`.
+
+Spilled records are stored in rotating segment files. Each segment carries a small
+self-describing header naming both the codec and the framing version it was written
+with, so a reader always decodes a file correctly even across a format change. A
+background replayer re-ships segments once the endpoint is healthy and deletes each on
+success; on startup it recovers any segments left by a previous run or crash. The buffer
+is bounded by both a total-bytes cap and a filesystem free-space floor — when either is
+hit, the **oldest** segment is deleted to make room, so logging can never exhaust the disk.
+
+**Replay is at-least-once, not exactly-once.** A segment has no durable read cursor: if it
+ships partway and then the endpoint starts failing — say the first 300 of 500 records are
+accepted before a 503 — the successful prefix is not recorded, and the **whole segment is
+re-read on the next pass**, re-delivering those 300. So any record that transits the spill
+buffer may arrive at the endpoint more than once. This is a deliberate trade-off: a durable
+per-record cursor would mean an `fsync` per replayed batch on the recovery path, and for
+logs a duplicate is a far cheaper failure than a loss. The live (non-spilled) path is
+unaffected, and duplicates only arise from a *partially* failed segment, so they are rare
+in practice — but if something downstream consumes these logs and must not see repeats,
+de-duplicate on a stable field (the preserved event timestamp plus the message, or your own
+event id) rather than assuming the buffer suppresses them.
+
+**Segment sizing is fuzzy and never splits a record.** Before each record is written, the
+active segment's size is checked (against an in-memory byte counter — no `stat` syscall)
+and a new segment is started if the record wouldn't fit. A record always lands **whole**
+in exactly one segment, so a message larger than `maxSpillFileBytes` produces one
+oversized segment rather than a record torn across two files. (The free-space floor probe
+*is* a syscall, so it is throttled — re-checked at most once per few MB written, and
+skipped entirely when `minFreeDiskBytes` is 0 — to keep the spill path cheap on
+CPU-throttled workers.)
+
+**Crash-corruption tolerance (binary format).** The binary format frames each record as
+`SYNC + length + CRC32C + payload`. If a runtime crash leaves the journal improperly
+closed and a record corrupted — a torn tail, a zero-filled block, or bit-rot in the
+middle of a segment — the reader detects the bad frame (failed sync, insane length, or
+CRC mismatch), **skips exactly the damaged record, and resumes from the next intact one**,
+rather than abandoning everything after the damage. The per-frame CRC is what makes that
+resync safe for **any** payload: a message whose own bytes happen to contain the sync
+marker (an HTTP wire dump, embedded JSON, raw binary) is rejected by the checksum and can
+never be mistaken for a frame boundary. Skipped bytes are surfaced via `spillStats()`
+(`corruptBytesSkipped`) so recovery is observable — counted for a torn trailing frame and
+for a segment with nothing readable left in it, not just interior damage. That last shape is
+why the counter earns its keep: zero records recovered *and* zero bytes skipped would make a
+wholly destroyed journal indistinguishable from one that never held anything.
+
+The CRC is computed only on the spill path (the abnormal case) and uses the JDK's
+hardware-accelerated CRC-32C, so steady-state healthy logging pays nothing. The JSON format
+keeps the simpler length-prefixed framing (torn-tail tolerant) for human readability.
+
+Turn it off, or point it somewhere durable, in `log4j2.xml`:
+
+```xml
+<BatchHttp name="newrelic" vendor="newrelic"
+           apiKey="${env:NEW_RELIC_API_KEY}"
+           spillEnabled="false"/>
+```
+
+| Attribute | Default | Meaning |
+|-----------|---------|---------|
+| `spillEnabled` | true | the disk-spill safety net. `false` turns it off, so a batch that fails after retries is dropped and counted instead of buffered |
+| `spillDirectory` | `${java.io.tmpdir}/batch-http-spill/<sink>` (`%TEMP%\...` on Windows) | base directory for segment files; derived from the JVM temp dir when unset. Set it explicitly where the temp dir is memory-backed — see "It is on by default" above |
+| `spillInstanceId` | appender `name` (engine falls back to the sink name) | identifier embedded in each segment file name (`spill-<instanceId>-<seq>.log`) so two or more apps sharing a spill directory never overwrite each other's logs; must be stable across restarts of the same app and distinct per running instance |
+| `maxSpillFileBytes` | 8388608 (8 MiB) | segment size before rotation (fuzzy — a record always lands whole in one segment, even if larger than this). A quarter of the total cap, so the buffer holds four segments: eviction sheds a quarter of the backlog at a time, and three closed segments stay replayable while a fourth fills |
+| `maxTotalSpillBytes` | 33554432 (32 MiB) | total cap; exceeding it evicts the oldest segment |
+| `minFreeDiskBytes` | 268435456 (256 MiB) | filesystem free-space floor; dropping below it evicts the oldest segment. It bounds the impact on the **volume**, not on this buffer, so it is deliberately not scaled to `maxTotalSpillBytes` — the spill directory usually shares a filesystem with the runtime's own logs and temp files, and this is the margin left for them. On a volume with less than this usable, spill degrades to counting drops rather than writing; lower it for a small dedicated volume. The probe is a syscall, so it is throttled (≈ once per few MB written); set to 0 to disable it and skip the syscall entirely |
+| `spillReplayIntervalMillis` | 10000 | how often the replayer attempts to drain segments |
+| `spillOnOverflow` | true | also divert queue-overflow records to disk (vs. dropping them) |
+| `spillFormat` | `BINARY` | on-disk record encoding: `BINARY` (compact TLV, all charsets, **corruption-tolerant** sync+CRC framing) or `JSON` (human-readable, torn-tail-tolerant framing) |
+| `spillRecoveryMode` | `ADOPT` | what to do with segments left by a previous run: `ADOPT` replays them, `IGNORE` leaves them untouched, `DELETE` discards them at startup |
+| `spillStartupReconcile` | true | at startup, evict oldest segments to satisfy the total cap and free-space floor before writing new logs |
+| `spillBacklogOrder` | `OLDEST_FIRST` | drain order: `OLDEST_FIRST`, `NEWEST_FIRST`, or `DUAL_STREAM` (ship freshest logs and the historical backlog in parallel) |
+| `spillReplayThreads` | 1 | parallel replay workers (forced to 2 for `DUAL_STREAM`) |
+| `spillReplayMaxBytesPerSec` | 0 | throttle the backlog drain to this many on-disk bytes/sec (0 = unlimited) so replay never starves live traffic |
+
+### Crash-resilience behavior
+
+- **Orphaned files from a previous run** (point 1) — on startup the store takes a
+  `FileLock` on a hidden lock file in the spill directory. If the lock is free, the
+  previous owner is gone and any `spill-*.log` files are genuine orphans, handled per
+  `spillRecoveryMode` (default `ADOPT` → they are replayed, so logs buffered just
+  before the crash still reach the endpoint). If the lock is held, a live sibling
+  process owns those files, so this instance leaves them alone — never
+  double-shipping or deleting another process's data.
+- **Parallel backlog drain** (point 2) — `DUAL_STREAM` runs two streams at once: one
+  ships the newest segments first (so recent logs surface immediately after recovery)
+  while the other works through the historical backlog; they meet in the middle.
+  `spillReplayMaxBytesPerSec` rate-caps the drain so a large backlog can't saturate
+  the intake or starve live traffic.
+- **Startup free-space check** (point 3) — with `spillStartupReconcile` on, a run that
+  inherits a large backlog on a nearly-full disk evicts the oldest segments to satisfy
+  both `maxTotalSpillBytes` and `minFreeDiskBytes` *before* it writes anything new.
+- **On-disk format** (point 4) — `BINARY` is a compact tag-length-value encoding
+  (UTF-8 strings, varint lengths) that round-trips every character set — non-Latin
+  scripts, emoji, control characters — and is smaller and faster to read/write than
+  the JSON alternative. `JSON` remains available (`spillFormat="JSON"`) when you want
+  to read the spill files by eye. The per-segment header records which was used, so
+  the two can coexist on disk across a config change.
+
+  Each spilled record begins with its event timestamp: the **first field of every
+  record** is the original `timestampMillis` (an 8-byte big-endian `int64` in `BINARY`,
+  a leading `"ts"` number in `JSON`), so no log ever loses its time — the timestamp is
+  carried through the spill and restored verbatim on replay. The **segment file name**,
+  by contrast, is *not* a timestamp: `spill-<instanceId>-00000000000000000000.log`
+  embeds the owning instance's id (see below) plus a zero-padded **sequence number**
+  whose only job is to make lexicographic order equal arrival order (so the replayer can
+  drain oldest-first). Newer segments simply have a higher number. Use the file's
+  modification time (or decode a record) if you need a wall-clock reference for a
+  segment; the per-record timestamps inside are the authoritative event times.
+
+- **Corrupted-journal recovery** — a record damaged by an improperly-closed journal is
+  skipped and replay resumes from the next intact one, rather than everything after the
+  damage being abandoned. This applies to `BINARY` only, which is what the `SYNC + length +
+  CRC32C` framing buys; `JSON` retains torn-tail tolerance, so a crash there loses only the
+  last, partial record. See "Crash-corruption tolerance" above for how the resync stays safe
+  for arbitrary payloads and how the skipped bytes are reported.
+
+- **Per-instance file naming** (`spillInstanceId`) — every segment name carries an
+  instance id, so two or more apps that share one spill directory (two same-vendor apps
+  on a host, or an explicitly shared `spillDirectory`) never write the same filename or
+  touch each other's segments. Each store lists, replays, evicts, and counts only files
+  bearing **its own** id, and takes a per-instance lock (`.spill-<instanceId>.lock`), so
+  co-located instances all stay live and independent. The id defaults to the appender
+  `name` (engine fallback: the sink name); set it explicitly when several appenders would
+  otherwise share a name. It must be **stable across restarts** of the same app (so its
+  own orphaned segments are recovered) and **distinct per running instance**. Segment
+  files written by a pre-upgrade run under the old id-less name (`spill-<seq>.log`) are
+  migrated into the instance's namespace on first startup (honoring `spillRecoveryMode`),
+  so upgrading never strands a buffered log.
+
+## Troubleshooting & diagnostics
+
+When logs aren't arriving, the first question is always *"is the appender failing, and
+why?"* The engine answers that itself — it logs its own health to Log4j2's **`StatusLogger`**,
+the out-of-band channel Log4j2 components use to report status. It deliberately does **not**
+log through an ordinary logger: this appender is often wired to the root logger, so routing
+its diagnostics through a normal `Logger` would feed them straight back into itself — an
+endpoint outage would then amplify into a feedback loop. `StatusLogger` never re-enters the
+appender pipeline, so it is safe by construction.
+
+### Where the messages go
+
+`StatusLogger` output is controlled by the `status` attribute on the configuration root and
+goes to the Log4j2 status console (and any status listeners):
+
+```xml
+<Configuration status="WARN" packages="com.mulesoft.support.batchhttp.log4j2">
+```
+
+In Mule/CloudHub the status output appears on the runtime's own stderr/console log — the same
+place Log4j2 reports a bad `log4j2.xml`. Set `status="INFO"` to also see the heartbeat. This is
+**separate** from the `<BatchHttp>` appender's own `diagnosticsLevel`: `status` is the floor for
+*all* Log4j2 internal logging, `diagnosticsLevel` gates *this appender's* messages within that.
+
+> **Avoid `status="OFF"` — it disables the whole safety net.** `StatusLogger` is the *only*
+> channel this appender has for reporting on itself, so turning status output off means no
+> dropped-batch warnings, no 4xx rejection, no queue-overflow notice, and no startup
+> credential failure: the appender goes back to failing exactly as silently as it did before
+> the v0.1.3 self-diagnostics were added, and the only symptom is logs not arriving.
+> `status="WARN"` is the minimum that keeps the failure reporting — it is what the two stock
+> Mule demos and the Java example use, while the two batch Mule demos use `status="INFO"` so
+> their heartbeat surfaces too. If your concern is status-log noise rather than this
+> appender, leave `diagnosticsLevel` at its `WARN` default (which already limits the appender
+> to failures only) or attach your own `StatusListener` to route the messages elsewhere,
+> instead of silencing `status` globally. Note this is a property of Log4j2's status plumbing
+> rather than something the appender can enforce, and it is not covered by a test, so treat
+> it as an operational recommendation.
+
+### What gets logged
+
+| Situation | Level | What you see |
+|-----------|-------|--------------|
+| Batch rejected with a 4xx (bad API key, wrong endpoint, payload too large) | `ERROR` | `dropped N record(s) — endpoint rejected the batch (HTTP 403); check credentials/endpoint, retrying will not help` |
+| Send failed after all retries, spill **on** | `WARN` | `send failed after 3 retries (HTTP 503) — spilled N record(s) to disk for retry` |
+| Send failed after all retries, spill **off** | `ERROR` | `dropped N record(s) — send failed after 3 retries (…) and spill is disabled` |
+| Queue full (endpoint not keeping up) | `WARN` | coalesced once per 5s: `queue full (capacity=…, policy=DROP_NEWEST): N record(s) dropped, M diverted to spill in the last 5s — the endpoint is not keeping up` |
+| Spill buffer could not initialise | `ERROR` | `spill disabled — could not initialise spill buffer: AccessDeniedException… (live shipping continues; failed batches will be dropped, not buffered)` |
+| Each retry attempt | `DEBUG` | `send attempt 2/4 failed (HTTP 503), retrying` |
+| Periodic heartbeat (`statsIntervalMillis > 0`) | `INFO` | `stats accepted=… sentRecords=… sentBatches=… dropped=… failedBatches=… queueDepth=… spill{onDiskBytes=… segments=… spilledRecords=… droppedRecords=… evictedSegments=…}` |
+
+`diagnosticsLevel` (default `WARN`) is the verbosity dial: `WARN` shows every failure above;
+`INFO` adds the heartbeat; `DEBUG` adds per-attempt retry lines. All messages are prefixed
+`batch-http[<sinkName>]` so you can grep one appender out of a busy status log.
+
+### "I see no spill files — is it broken?"
+
+No — that's the **healthy** state. The spill directory is created eagerly at startup (so it
+exists as soon as the appender does, spill being on by default), but segment files are written
+**only on a failure path**: a batch that fails after all retries, or queue overflow with
+`spillOnOverflow`. An empty
+`${java.io.tmpdir}/batch-http-spill/<sink>` under load means the endpoint is accepting your logs and there is
+nothing to buffer. To confirm delivery positively rather than by the absence of spill files, set
+`statsIntervalMillis` and watch `sentRecords` climb in the heartbeat — or check the intake (e.g.
+Datadog → Logs) directly. To *prove* the safety net works, point at a bad key/endpoint and watch
+segment files appear, then drain and delete once connectivity returns.
+
+### Programmatic counters
+
+Beyond the logs, `BatchingLogShipper.stats()` and `spillStats()` expose live counters
+(`accepted`/`sentRecords`/`dropped`/`queueDepth`, `spilledRecords`/`droppedRecords`/`segmentCount`)
+for wiring into JMX or a metrics system. The heartbeat line is just these rendered to the status
+log on a timer. See the invariant below for how they reconcile.
+
+## Validating memory safety and full drain
+
+The appender holds events in a bounded in-memory queue and (optionally) on disk, so
+the two failure modes worth proving out are: **(1)** memory does not grow without
+bound under sustained load or a downed endpoint, and **(2)** every accepted record is
+eventually shipped — nothing is silently stranded in the queue or in a spill segment.
+Both are observable without a profiler using the counters the engine already exposes.
+
+### The invariant to check
+
+`BatchingLogShipper.stats()` exposes `accepted`, `dropped`, `sentRecords`, and
+`queueDepth`; `spillStats()` exposes `spilledRecords`, `droppedRecords`, and
+`segmentCount`. After a **clean shutdown against a healthy endpoint** the engine
+should satisfy:
+
+```
+accepted == sentRecords + dropped + spillDropped   # conservation of records
+queueDepth == 0                                    # the in-memory queue fully drained
+segmentCount == 0                                  # the spill buffer fully drained
+```
+
+where `spillDropped` is `spillStats().droppedRecords` (0 when spill is disabled). Each
+term on the right is a place a record can legitimately end up, and **every one is
+counted, never silent**:
+
+- `sentRecords` — delivered to the endpoint (live or via spill replay).
+- `dropped` — shed on purpose by the overflow policy when spill is off/full, or a
+  terminal 4xx the engine won't retry.
+- `spillDropped` — the disk buffer itself evicted/refused a record under the
+  total-bytes cap or free-space floor (bounded-buffer back-pressure, by design).
+
+If `accepted` exceeds that sum, records leaked. If `queueDepth` or `segmentCount` stay
+above zero after `close()` returns **and the endpoint is up**, the drain is incomplete.
+(With the endpoint *down*, a non-zero `segmentCount` at shutdown is expected and
+correct — see the caveat at the end of this section.)
+
+The equality is stated for a **healthy** endpoint for a reason: spill replay is
+at-least-once, so if the endpoint flapped mid-segment, the re-shipped prefix is counted in
+`sentRecords` again and the sum can legitimately come out **above** `accepted`. Read a
+surplus as duplicate delivery (expected, see "Disk-spill buffer"), and only a *shortfall*
+as a leak.
+
+### 1. No unbounded memory growth
+
+The queue is hard-capped at `queueCapacity` (default 10 000) and overflow is governed
+by `overflowPolicy` — it cannot grow past the cap by construction. To prove it under
+load:
+
+```bash
+# Run the JVM with a tight, fixed heap and a soak workload. If the queue or spill
+# bookkeeping leaked, the bounded cap would be exceeded and you'd see OOM / steady
+# old-gen growth across GCs rather than a sawtooth that returns to baseline.
+java -Xmx128m -Xms128m -Xlog:gc -jar your-app.jar
+```
+
+- Watch `queueDepth` stay at or below `queueCapacity` throughout (it should oscillate,
+  not climb monotonically).
+- With the endpoint **down** and spill enabled, memory must still stay flat: failed
+  batches move to **disk**, not an unbounded in-memory retry list. `segmentCount` grows
+  on disk (capped by `maxTotalSpillBytes` / `minFreeDiskBytes`, oldest-evicted), while
+  heap stays bounded.
+- For a definitive check, take two heap histograms (`jmap -histo:live <pid>`) a few
+  minutes apart under steady load and confirm `LogRecord` / `byte[]` counts are not
+  trending up.
+
+### 2. Full drain after processing
+
+`close()` (which Log4j2 calls on `appender.stop()`) drains and flushes within
+`shutdownDrainTimeout`, then stops the replayer and seals the spill store. To verify
+nothing is stranded:
+
+```java
+// In a test or a tiny main(), against a mock intake that records what it receives:
+for (int i = 0; i < N; i++) shipper.offer(record(i));
+shipper.close();                       // blocks until drained or the drain timeout
+
+var s = shipper.stats();
+assert s.accepted == s.sentRecords + s.dropped;   // conservation of records
+assert s.queueDepth == 0;                          // in-memory queue empty
+var sp = shipper.spillStats();
+assert sp == null || sp.segmentCount == 0;         // spill buffer empty (healthy endpoint)
+```
+
+This is exactly what the end-to-end tests assert; run them with `mvn test`. For the
+**outage → recovery** path, drive the "Watch it work" steps in the demo READMEs:
+spill files accumulate while the endpoint is down, then `ls` the spill directory shows
+it empty once a healthy endpoint lets the background replayer drain every segment.
+
+> One caveat to design for, not a leak: if `close()` cannot reach a downed endpoint
+> within `shutdownDrainTimeout`, undelivered records are spilled to disk (not lost) and
+> replayed on the **next** startup (`spillRecoveryMode=ADOPT`). "Full drain" there means
+> across the restart, not within the single process — `segmentCount > 0` at shutdown
+> with a dead endpoint is correct durability behavior, not a stranded-record bug.
+
+## Status
+
+Proof-of-concept (v0.1). Validated by unit + end-to-end tests (`mvn test`) and the
+benchmark above. See "Roadmap" below for what a production v1 would add.
+
+## Roadmap to production v1
+
+- **Logback adapter** module (the core is already framework-agnostic).
+- **Circuit breaker** to stop hammering a downed endpoint.
+- Per-sink **metrics export** (Micrometer) and JMX beans.
+- JMH benchmarks and back-pressure soak tests.
+- **mTLS (client-certificate auth)** — a `keyStore`/`keyStorePassword` (and optional
+  custom `trustStore`) on the appender, feeding a `KeyManager` into the same
+  transport `SSLContext` the `trustAllCertificates` switch already uses on the
+  TrustManager side. For collectors that require the client to present a certificate.
+- Consider the **OpenTelemetry** appender + Collector path as an alternative for
+  multi-vendor routing without app redeploys (build-vs-adopt trade-off).
+
+## Author
+
+Created and maintained by **Vitalii Mykytenko**
+Senior Principal Technical Support Engineer
+MuleSoft Signature Success Support, Australia
+
+Please raise questions and bug reports as GitHub Issues rather than contacting the author
+directly — see [Contributing](#contributing) below.
+
+## License
+
+Licensed under the Apache License, Version 2.0. The full text is in [`LICENSE.txt`](LICENSE.txt),
+and every Salesforce-authored source and configuration file carries the corresponding
+`SPDX-License-Identifier: Apache-2.0` header.
+
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md). The governance model is **published but not
+supported**: the code is shared because it may be useful, but contributions are not actively
+solicited and there is no support commitment. Bug reports, questions and ideas belong on the
+repository's GitHub Issues page.
+
+## Security
+
+Please report security vulnerabilities as described in [`SECURITY.md`](SECURITY.md) — via
+Salesforce's responsible disclosure process, not as a public GitHub issue.
+
+## Code of Conduct
+
+Participation in this project is governed by the Salesforce Open Source
+[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).
