@@ -171,6 +171,25 @@ to disk as `SpillStore` segment files instead of being dropped, and a background
 Because it is on by default it also writes to local storage by default — see
 "Disk-spill buffer" for where, and when to turn it off.
 
+For contrast, the stock `<Http>` appender has none of the middle — no bounded
+queue, no batching, no spill. Each event is one blocking POST, and under load the
+async ring buffer fills, so the flow thread blocks on the enqueue and logging turns
+synchronous (a rendered PNG of this sits at `docs/img/stock-path-blocking.png`):
+
+```mermaid
+flowchart TD
+    App["App / Log4j2"] -->|log event| Ring["Async ring buffer<br/>(fixed slots)"]
+    Ring -->|one event at a time| Appender["Stock HttpAppender"]
+    Appender ==>|one blocking POST per event| Intake[("Vendor intake API")]
+    Intake -.->|thread waits for full round-trip| Appender
+    Ring x--x|under load: buffer fills,<br/>flow threads block on offer| App
+
+    classDef block fill:#F4C6C0,stroke:#B23A2E,stroke-width:1.5px,color:#3a1512;
+    classDef norm fill:#EAEFF5,stroke:#4A6FA5,stroke-width:1.3px,color:#12233a;
+    class Appender,Intake block;
+    class App,Ring norm;
+```
+
 - **`batch-http-core`** — framework-agnostic engine. **Zero runtime dependencies**
   (uses the JDK 11+ `HttpClient`). Contains the queue, batching triggers, retry,
   gzip, lifecycle, and the per-vendor `LogSink` implementations.
