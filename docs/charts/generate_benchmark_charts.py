@@ -23,8 +23,10 @@ Charts produced:
                                    gap, so the log axis carries no "bar length is
                                    meaningless" caveat.
   4. warmup-cold-start           — the cold-start story: Test 1 (1m) vs churn vs
-                                   Test 3 (5m) req/s for the batch apps, showing why
-                                   the 1-min Test-1 number under-reports warm throughput.
+                                   Test 3 (5m) req/s, batch AND stock side by side per
+                                   plane, showing that batch ramps as warmup amortises
+                                   while stock stays flat and far lower (the 1-min
+                                   Test-1 number under-reports warm batch throughput).
 """
 
 import os
@@ -401,46 +403,102 @@ def figure_latency_range(label="z5m"):
 
 
 # ===========================================================================
-# Figure 3 — the cold-start / warmup story. For each BATCH app, req/s in
-# Test 1 (1m) vs churn (1m, warm) vs Test 3 (5m). Shows Test1 < churn < Test3,
-# i.e. the 1-min Test-1 number is dragged down by cold-start ramp.
+# Figure 3 — the cold-start / warmup story, batch AND stock side by side. For
+# each app and phase (Test 1 1m → churn 1m warm → Test 3 5m) the batch bar and
+# the stock bar sit together, so two things read at once: batch req/s ramps as
+# the cold-start cost (JIT/TLS/pools) is amortised over a longer window, while
+# stock stays flat and far below — even cold batch (Test 1) beats warm stock.
+# The two planes ran at different concurrency / CPU, so they get separate panels
+# each on its own y-scale (compare within a panel, not across).
 # ===========================================================================
-def figure_warmup():
-    apps = [(p[0], p[1], p[3]) for p in PAIRS]  # batch apps only
-    phases = [("Test 1 (1 min)", "z1m"), ("Churn (1 min, warm)", "z1m_churn"),
-              ("Test 3 (5 min)", "z5m")]
-    fills = ["#9ECAE1", "#4292C6", "#08519C"]  # light->dark blue ramp
+def _fmt(v):
+    return f"{v:,.1f}" if v < 10 else f"{v:,.0f}"
 
-    n = len(apps)
-    x = list(range(n))
-    group_w = 0.8
-    bw = group_w / len(phases)
-    fig, ax = plt.subplots(figsize=(10.6, 6.4))
 
-    for pi, (pname, plabel) in enumerate(phases):
-        vals = [load(plabel, a[1])["reqsec"] for a in apps]
-        offs = [xi - group_w / 2 + bw / 2 + pi * bw for xi in x]
-        ax.bar(offs, vals, width=bw * 0.94, color=fills[pi], edgecolor=INK,
-               linewidth=0.8, label=pname, zorder=3)
-        for ox, v in zip(offs, vals):
-            ax.text(ox, v + max(vals) * 0.015, f"{v:,.0f}", ha="center", va="bottom",
-                    fontsize=10.5, fontweight="bold", color=INK, zorder=4)
+def _warmup_panel(ax, pairs, phases, title):
+    step_phase = 1.0   # spacing between phase clusters inside one app
+    gap_app = 1.45     # extra spacing between the two apps in the panel
+    bw = 0.40          # bar width; batch/stock offset ±0.215 around the cluster
+    cluster_x, cluster_lbl, app_marks = [], [], []
+    ymax = 0.0
 
-    ax.set_xticks(x)
-    ax.set_xticklabels([a[0] for a in apps])  # keep the plane\nvendor two-line form
-    ax.set_ylabel("Requests / second (batch appender)", labelpad=10)
+    for ai, pair in enumerate(pairs):
+        base = ai * (2 * step_phase + gap_app)
+        for pi, (_pname, plabel) in enumerate(phases):
+            c = base + pi * step_phase
+            b = load(plabel, pair[1])["reqsec"]
+            s = load(plabel, pair[2])["reqsec"]
+            ymax = max(ymax, b, s)
+            ax.bar(c - 0.215, b, width=bw, color=BATCH_FILL, edgecolor=BATCH_EDGE,
+                   linewidth=1.1, hatch="///", zorder=3)
+            ax.bar(c + 0.215, s, width=bw, color=STOCK_FILL, edgecolor=STOCK_EDGE,
+                   linewidth=1.1, zorder=3)
+            cluster_x.append(c)
+            cluster_lbl.append(phases[pi][0])
+        app_marks.append((base + step_phase, pair[0]))
+
+    head = ymax * 0.045
+    for ai, pair in enumerate(pairs):
+        base = ai * (2 * step_phase + gap_app)
+        for pi, (_pname, plabel) in enumerate(phases):
+            c = base + pi * step_phase
+            b = load(plabel, pair[1])["reqsec"]
+            s = load(plabel, pair[2])["reqsec"]
+            ax.text(c - 0.215, b + head, _fmt(b), ha="center", va="bottom",
+                    fontsize=10, fontweight="bold", color=INK, zorder=4)
+            ax.text(c + 0.215, s + head, _fmt(s), ha="center", va="bottom",
+                    fontsize=10, fontweight="bold", color=STOCK_EDGE, zorder=4)
+            if s:
+                ax.text(c, max(b, s) + head * 3.2, f"{b / s:.0f}×", ha="center",
+                        va="bottom", fontsize=10.5, fontweight="bold",
+                        color=BATCH_EDGE, zorder=4)
+
+    ax.set_ylim(0, ymax * 1.22)
+    ax.set_xlim(-0.7, app_marks[-1][0] + step_phase + 0.6)
+    ax.set_xticks(cluster_x)
+    ax.set_xticklabels(cluster_lbl, fontsize=10.5)
+    ax.tick_params(axis="x", length=0)
     ax.grid(axis="y", color=GRID, linewidth=0.9, zorder=0)
     ax.set_axisbelow(True)
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
-    ax.legend(frameon=False, ncol=3, loc="upper center", bbox_to_anchor=(0.5, -0.11))
+    ax.set_title(title, loc="left", fontsize=14, fontweight="bold", pad=8)
 
-    fig.suptitle("Warmup effect: the 1-minute Test 1 under-reports warm throughput",
-                 fontsize=17, fontweight="bold", x=0.045, ha="left", y=1.005)
-    fig.text(0.045, 0.945,
-             "Batch apps only · req/s rises Test 1 → churn → Test 3 as cold-start ramp "
-             "(JIT/TLS/pools) is amortised over a longer window",
-             fontsize=11, color=MUTED, ha="left", va="top")
+    # App (vendor) labels below the phase row, spanning each app's 3 clusters.
+    for cx, name in app_marks:
+        ax.text(cx, -0.145, name.replace("\n", " · "), transform=ax.get_xaxis_transform(),
+                ha="center", va="top", fontsize=12, fontweight="bold", color=INK)
+
+
+def figure_warmup():
+    ch1 = [p for p in PAIRS if p[3] == "ch1"]
+    ch2 = [p for p in PAIRS if p[3] == "ch2"]
+    phases = [("Test 1\n1 min", "z1m"), ("Churn\n1 min", "z1m_churn"),
+              ("Test 3\n5 min", "z5m")]
+
+    fig, (axL, axR) = plt.subplots(1, 2, figsize=(14.2, 6.8))
+    _warmup_panel(axL, ch1, phases, "CloudHub 1.0  (-c 10)")
+    _warmup_panel(axR, ch2, phases, "CloudHub 2.0  (-c 5)")
+    axL.set_ylabel("Requests / second  (higher is better)", labelpad=10)
+
+    fig.suptitle("Warmup: batch throughput ramps as cold-start is amortised — stock stays flat and far lower",
+                 fontsize=16.5, fontweight="bold", x=0.045, ha="left", y=1.010)
+    fig.text(0.045, 0.958,
+             "req/s per phase, batch vs stock side by side · Test 1 (1 min) → Churn (1 min, warm) "
+             "→ Test 3 (5 min)",
+             fontsize=11.5, color=MUTED, ha="left", va="top")
+    fig.legend(handles=legend_handles(), loc="upper left", bbox_to_anchor=(0.045, 0.918),
+               frameon=False, ncol=2, columnspacing=2.2, handlelength=1.9)
+    fig.text(0.045, -0.05,
+             "× = batch÷stock req/s for that phase. Batch rises Test 1 → churn → Test 3 as the cold-start "
+             "ramp (JIT/TLS/connection pools) is\namortised over a longer window, so the 1-min Test 1 "
+             "under-reports warm batch throughput; stock barely moves. Even cold batch\n(Test 1) already "
+             "beats warm stock. The two planes ran at different concurrency and CPU (CH1 -c 10 burstable, "
+             "CH2 -c 5 hard-capped),\nso each panel is on its own y-scale — read within a panel, not across. "
+             "One run per configuration, 2026-08-04.",
+             fontsize=10.5, color=MUTED, ha="left", va="top", linespacing=1.5)
+
+    fig.tight_layout(rect=(0, 0.02, 1, 0.89))
     save(fig, "cloudhub-warmup-cold-start")
 
 
