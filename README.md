@@ -184,7 +184,7 @@ Because it is on by default it also writes to local storage by default — see
 **Prerequisites:** JDK 17+ and Maven 3.8+ (`java -version`, `mvn -version`).
 
 The project is a Maven multi-module reactor (`groupId` `com.mulesoft.support.batchhttp`, version
-`0.1.3`). To build everything and install the artifacts into your local
+`0.1.4`). To build everything and install the artifacts into your local
 Maven repository (`~/.m2/repository`) so other projects can depend on them:
 
 ```bash
@@ -212,7 +212,7 @@ After install, the artifacts are available to other builds as:
 <dependency>
     <groupId>com.mulesoft.support.batchhttp</groupId>
     <artifactId>batch-http-log4j2</artifactId>
-    <version>0.1.3</version>
+    <version>0.1.4</version>
 </dependency>
 ```
 
@@ -605,6 +605,16 @@ traces) rides along as attributes.
 > wholly unreadable segment — the two likeliest post-crash shapes. A crash-recovery replay
 > may now report a non-zero value where it previously read zero; nothing regressed, the old
 > number was simply under-reporting, so revisit any alert threshold set against it.
+
+<!-- -->
+
+> **New in v0.1.4 — benchmark documentation:** no appender code changed; this release
+> publishes the reproducible 2026-08-04 CloudHub benchmark of the batch appender vs the
+> stock Log4j2 `<Http>` appender (4-test harness, 5-minute Test 3 headline, plane-specific
+> concurrency) as `docs/benchmark-results.md`, the rendered `docs/index.html`, the charts
+> under `docs/img/`, and the `docs/benchmark-runbook.md` reproduction guide. The benchmark
+> tables intentionally keep the **`0.1.3`** label because that is the build that was
+> measured; the artifact version is bumped to `0.1.4` for this docs release.
 
 The engine also respects the hard per-request intake limits each sink declares — a record
 count and an uncompressed body size, drawn from that vendor's documented ceilings — and
