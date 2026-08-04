@@ -1,6 +1,6 @@
 # Batching vs stock HTTP appender — CloudHub load benchmark
 
-_Generated 2026-08-04T09:44:24Z. Worker types below; hardware specs intentionally omitted._
+_Generated 2026-08-04T10:20:35Z. Worker types below; hardware specs intentionally omitted._
 
 ## How to read this
 
@@ -70,7 +70,13 @@ by the `N× lower` gap, so the log axis carries no "bar length is meaningless" c
 
 ### Warmup / cold-start effect (why Test 1 reads low)
 
-![Batch-appender req/s rising Test 1 → churn → Test 3 as cold-start ramp is amortised](img/cloudhub-warmup-cold-start.png)
+![Batch and stock req/s side by side per phase: batch ramps Test 1 → churn → Test 3 as the cold-start ramp is amortised, while stock stays flat and far lower](img/cloudhub-warmup-cold-start.png)
+
+Batch and stock are shown side by side for each phase. The batch bars rise Test 1 → churn → Test 3 as the
+cold-start ramp (JIT/TLS/connection pools) is amortised over a longer window, so the 1-minute Test 1
+under-reports warm batch throughput; the stock bars barely move. Even cold batch (Test 1) already beats
+warm stock. The two planes ran at different concurrency (CH1 `-c 10`, CH2 `-c 5`) on different CPU, so each
+panel is on its own y-scale — compare within a panel, not across.
 
 _Tests are numbered by execution order (the order below)._
 
