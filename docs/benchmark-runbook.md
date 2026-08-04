@@ -5,13 +5,19 @@ SPDX-License-Identifier: Apache-2.0
 # CloudHub benchmark runbook
 
 How to reproduce (or re-run) the **"Measured on CloudHub (real Datadog and New Relic intake)"**
-figures in [`../README.md`](../README.md) and the full report in [`index.html`](index.html).
+figures in [`../README.md`](../README.md) and the full report in
+[`benchmark-results.md`](benchmark-results.md) / [`index.html`](index.html).
 
-This is the operator-facing procedure, and it is the protocol the currently published figures
-were measured under: `oha --no-tui -z 1m -c 5` against `/log?count=15` — 17 log events per
-request — over plain `http`, **identical on both planes**, after a 5-request warmup and a 10 s
-pause, with a 10 s settle after each run, driven paired-parallel with one vendor per side. §7 is
-the authoritative statement of it; §6 is where you confirm it before measuring.
+This is the operator-facing **manual single-run** procedure: `oha` against `/log?count=20` — 22
+log events per request — over plain `http`, after a warmup, driven paired-parallel with one
+vendor per side. §7 is the authoritative statement of it; §6 is where you confirm it before
+measuring. **Note on provenance:** the currently published figures (2026-08-04) were produced by
+the automated **4-test** harness (Test 1 = 1 min, Test 2 = in-thread churn, Test 3 = 5 min
+sustained — the headline — and Test 4 = 5 min with a 30 s per-request cap), which restarts and
+warms every app before each test and drives **plane-specific concurrency (CloudHub 1.0 at
+`-c 10`, CloudHub 2.0 at `-c 5`)**. The manual recipe below is the equivalent single-run path;
+where it and the harness differ, the harness is authoritative — follow the plane-specific `-c`
+and `count=20` here so a manual re-run stays comparable.
 
 It also exists because a version string cannot identify a build: the appender jars have changed
 repeatedly (append hot path, UTF-8 byte estimation, flusher lifecycle/termination, retry timing,
@@ -19,19 +25,20 @@ spill accounting) while the POM version stayed at `0.1.3`, so `0.1.3` alone cann
 code produced a number. Re-run from source, record the commit, and republish.
 
 > **Provenance — which figures this runbook describes.** The figures in
-> [`../README.md`](../README.md) and [`index.html`](index.html) are the run of **2026-08-03**,
-> measured under the protocol in §7, whose parameters are recorded on both of those surfaces and
-> in the chart script. An **earlier, superseded** set of Datadog-only tables (73.18 / 4.05 req/s
-> on CloudHub 1.0, 12.75 / 2.83 on CloudHub 2.0) was measured in July under a *different*
-> protocol: per-plane asymmetric load (`-c 10` / `count=30` on CloudHub 1.0 against `-c 5` /
-> `count=15` on CloudHub 2.0), plain `http` on 1.0 against `https` on 2.0, and a 3-request
-> warmup. That asymmetry is precisely what made the two July platform tables incomparable with
-> each other. At least **two** July runs exist — a separate reference run in the operator's local
-> harness notes lists materially different CloudHub 2.0 throughput — and **no raw `oha` output
-> from any July run survives**, in the repository or beside the harness, so the July parameters
-> remain *asserted* rather than *recorded*; the arithmetic in §11 reads the July tables at `-c 10`
-> on both planes and cannot settle `count=` either way. §11 keeps that audit as history. Do not
-> quote a July figure as current, and do not carry its cross-plane comparison forward — see §11.
+> [`../README.md`](../README.md), [`benchmark-results.md`](benchmark-results.md) and
+> [`index.html`](index.html) are the run of **2026-08-04**, produced by the automated **4-test**
+> harness (see the note above): the headline is **Test 3**, a 5-minute sustained run at
+> plane-specific concurrency (CloudHub 1.0 `-c 10`, CloudHub 2.0 `-c 5`) against
+> `/log?count=20` (22 log events/request) over plain `http`. Raw `oha` output for all four tests
+> is retained locally (git-ignored, it carries hostnames) under `.claude/bench-results/`, and the
+> charts + Markdown report are regenerated from it, so those figures are *recorded*, not asserted.
+> An **earlier, superseded** set of Datadog-only tables (73.18 / 4.05 req/s on CloudHub 1.0,
+> 12.75 / 2.83 on CloudHub 2.0) was measured in July under a *different* protocol: per-plane
+> asymmetric load (`-c 10` / `count=30` on CloudHub 1.0 against `-c 5` / `count=15` on CloudHub
+> 2.0), plain `http` on 1.0 against `https` on 2.0, and a 3-request warmup. At least **two** July
+> runs exist and **no raw `oha` output from any July run survives**, so the July parameters remain
+> *asserted* rather than *recorded*; §11 keeps that audit as history. Do not quote a July figure
+> as current, and do not carry its cross-plane comparison forward — see §11.
 
 ## Contents
 
@@ -461,11 +468,13 @@ a speculative one, and each is something the published protocol deliberately fix
 - [ ] **Same appender build in both batch apps** — each deployable's bundled appender matched
       against the jars from the same build pass, per §2.
 - [ ] **Same sizing** — CH1: 1 worker × 0.1 vCore. CH2: 1 replica × 0.1 vCore.
-- [ ] ⚠ **Identical load parameters on both planes** — **`-c 5` and `count=15`** on every run,
-      CloudHub 1.0 and CloudHub 2.0 alike. The superseded July harness used **`-c 10` /
-      `count=30` on CloudHub 1.0 and `-c 5` / `count=15` on CloudHub 2.0**: half the concurrency
-      and half the log events per request, which is what made its two platform tables
-      incomparable. Keep them identical (§7), and record the values you used (§8).
+- [ ] ⚠ **Plane-specific concurrency, identical payload** — **`count=20`** (22 log events/request)
+      on every run, both planes. Concurrency is **`-c 10` on CloudHub 1.0 and `-c 5` on CloudHub
+      2.0**: the CloudHub 2.0 replica is a capped-CPU, no-swap worker held at lower concurrency to
+      stay off its OOM ceiling. Because `-c` differs, **read each plane's batch-vs-stock contrast
+      on its own — never CloudHub 1.0 against CloudHub 2.0.** Record the values you used (§8). (The
+      next benchmark round plans to even concurrency across planes; until then, keep the values
+      above so a re-run matches the published figures.)
 - [ ] ⚠ **Same URL scheme on both planes** — plain **`http`** everywhere. The July run drove
       CloudHub 1.0 over plain `http` and CloudHub 2.0 over `https`; see the scheme note in §4.
 - [ ] **Region parity.** The CloudHub 1.0 worker region as the platform reports it and the
@@ -515,20 +524,19 @@ a speculative one, and each is something the published protocol deliberately fix
 ## 7. Warmup and measured run
 
 Per phase, in this order. `$URL` is each app's public base URL as the platform reported it in §4,
-never a hostname you assembled yourself. This is the published protocol — the parameters below are
-the ones the figures in [`../README.md`](../README.md) and [`index.html`](index.html) were measured
-with, and they are **identical on both planes**.
+never a hostname you assembled yourself. This is the manual single-run equivalent of the harness's
+**Test 3** (the 5-minute sustained headline); set `CONC` to the value for the plane you are testing.
 
 ```text
-5× curl warmup  →  pause 10 s  →  oha -z 1m load test  →  settle 10 s  →  next phase
+5× curl warmup  →  pause 10 s  →  oha -z 5m load test  →  settle 10 s  →  next phase
 ```
 
 ```bash
 # One app's side of a phase. The paired app of the other vendor runs this same block
 # concurrently, in step — see "Run it paired-parallel" below.
 URL="${BATCH_URL}"          # captured from describe -o json in §4
-CONC=5                      # the same value on both planes — see "Equalise the two planes" below
-COUNT=15                    # likewise, so 17 log events per request
+CONC=10                     # CloudHub 1.0: -c 10 ; CloudHub 2.0: -c 5 — see "Concurrency by plane" below
+COUNT=20                    # both planes, so 22 log events per request
 
 # 1. Warmup — 5 requests, one after another. Primes JIT, the connection pool,
 #    and (batch app) the flusher thread. A lighter warmup left first-run
@@ -542,8 +550,9 @@ done
 #    measured run starts from an empty queue.
 sleep 10
 
-# 3. Measured run.
-oha --no-tui -z 1m -c "$CONC" "$URL/log?count=$COUNT" | tee "run-<app>-<n>.txt"
+# 3. Measured run (Test 3 = 5 minutes). Add -w to drain in-flight requests past the
+#    deadline as the harness does; add -t 30s for the Test 4 per-request-cap variant.
+oha --no-tui -z 5m -w -c "$CONC" "$URL/log?count=$COUNT" | tee "run-<app>-<n>.txt"
 
 # 4. Settle 10 s before the next phase.
 sleep 10
@@ -568,7 +577,9 @@ unreachable, and this is exactly how it fails.
 
 Notes on the flags:
 
-- **`--no-tui -z 1m -c 5 <url>`** is the whole command line. `-z 1m` and `-z 60s` are equivalent.
+- **`--no-tui -z 5m -w -c <plane-conc> <url>`** is the whole command line (Test 3). `-z 5m` and
+  `-z 300s` are equivalent; the harness also runs a 1-minute Test 1 (`-z 1m`) and a 30 s-cap Test 4
+  (`-z 5m -t 30s`).
 - **No `--insecure`, and no `curl -k`.** Both planes are driven over plain `http` (§4), so there
   is no certificate to accept. The superseded July run needed `--insecure` because it drove
   CloudHub 2.0 over `https` against a private-space certificate; pass it again only if you
@@ -577,9 +588,12 @@ Notes on the flags:
 - The run uses **oha's defaults** for everything else, and they are worth pinning deliberately
   rather than inheriting: HTTP/1.1, keep-alive **on**, **no** per-request timeout (`-t` unset), no
   rate limit (`-q` unset).
-- **`-w` is not passed.** Without it, requests still in flight when the 60 s deadline closes are
-  aborted and reported as such, which is the expected tail. (The published runs all completed the
-  full minute, so that tail is empty on them.)
+- **`-w` (wait-ongoing-requests-after-deadline) IS passed** on the published runs, so the `-c`
+  in-flight requests drain to completion instead of being aborted at the deadline. This makes the
+  reported `Total` read slightly longer than the nominal `-z` — and the stock appender's
+  one-blocking-POST-per-event tail drains visibly longer than batch, which is itself a result, not
+  an artifact. Omitting `-w` instead aborts the in-flight tail and reports it as
+  `aborted due to deadline`.
 - **`--output-format json` was not used** — the plain text summary goes through `tee`. Adding it
   is strictly better for a re-run: machine-readable percentiles you can feed into the chart
   script, no TUI CPU cost on the client, and — see below — no exposure to the text renderer's
@@ -588,28 +602,23 @@ Notes on the flags:
   `/log?count=N` endpoint as the measured run; its output is discarded.
 
 **Events per request is `count + 2`** — a `batch.start` (INFO), `count` × `order.processed`
-(INFO), and a `batch.completed` (WARN). So the protocol's `/log?count=15` emits **17 log events**
+(INFO), and a `batch.completed` (WARN). So the protocol's `/log?count=20` emits **22 log events**
 per request; `count=30` would emit 32.
 
-### Equalise the two planes
+### Concurrency by plane
 
-The protocol uses **`-c 5` and `count=15` everywhere** — both planes, both vendors, every run.
-Keep it that way.
+The published protocol holds **`count=20` everywhere** (same per-request work on both planes) but
+uses **plane-specific concurrency: `-c 10` on CloudHub 1.0, `-c 5` on CloudHub 2.0**. The CloudHub
+2.0 replica is a capped-CPU, no-swap worker; at `-c 10` it risks the OOM ceiling, so it is held at
+`-c 5`. Keep the payload identical and the concurrency per-plane as above.
 
-This is a correction, not an inheritance. The superseded July harness did *not* use the same load
-on both platforms: it drove CloudHub 1.0 at `-c 10` / `count=30` and CloudHub 2.0 at `-c 5` /
-`count=15` — half the concurrent connections and half the log events per request.
+Because `-c` differs across planes, **a cross-plane comparison is not valid** — read each plane's
+batch-vs-stock contrast on its own. This is looser than the ideal (equal concurrency everywhere),
+and the next-round methodology plan is to even it up by driving both planes at `-c 10` and
+recording whether CloudHub 2.0 OOMs. Until then the per-plane values above are what the published
+figures used, so match them for a comparable re-run.
 
-The July asymmetry was not wrong on its own terms. Halving the load on the weaker plane is a
-perfectly sensible thing to do when you only care about batch-vs-stock within that plane, which
-that method explicitly stated was the only valid comparison. It became a defect because the report
-around it *did* read across planes, and a cross-plane comparison between `-c 10` /
-32-events-per-request and `-c 5` / 17-events-per-request measures the parameter difference at
-least as much as it measures the platform. **The two July platform tables cannot be read against
-each other**, and any re-run that kept the asymmetry would inherit the same defect. Holding the
-parameters identical is what removes it.
-
-Note that identical parameters are necessary but not sufficient for a cross-plane reading: the
+Even with equal concurrency a cross-plane reading would still be only necessary-not-sufficient: the
 two generations have different CPU models — burstable versus hard-capped — which the published
 surfaces cite as the remaining reason each table stands on its own. Record the values in the
 report either way, per §8.
@@ -628,16 +637,17 @@ three of the eight runs behind the published figures, each of which carries the 
 Two independent confirmations, both cheap:
 
 1. **Little's Law.** Under a closed-loop load with no rate limit,
-   `requests/sec × mean latency ≈ -c`, which under this protocol is **5**. Land on the
-   concurrency you asked for and the latency is real. Land on **one tenth** of it and apply the
-   ×10 correction to every latency and percentile in that run.
-2. **Total duration.** A `-z 1m` run must total ≈ 60 s. A printed `6.000x` is the same glitch
-   showing in the duration field → apply the ×10 correction.
+   `requests/sec × mean latency ≈ -c` — which is **10** on CloudHub 1.0 and **5** on CloudHub 2.0
+   under this protocol. Land on the concurrency you asked for and the latency is real. Land on
+   **one tenth** of it and apply the ×10 correction to every latency and percentile in that run.
+2. **Total duration.** A `-z 5m` run must total ≈ 300 s (with `-w`, slightly longer as the tail
+   drains). A printed `30.00x`/`6.000x`-style value (i.e. ≈ `-z` ÷ 10) is the same glitch showing
+   in the duration field → apply the ×10 correction.
 
 Two cautions on using the law:
 
 - **It only ever validates the concurrency, never the payload.** `count=` does not appear in it.
-  A run at `count=15` and a run at `count=30` satisfy it identically, so the law cannot tell you
+  A run at `count=20` and a run at `count=30` satisfy it identically, so the law cannot tell you
   which workload produced a number. Only your own record of the parameters can.
 - **It loosens on any run that sheds requests.** A request aborted at the deadline or dropped
   under back-pressure is counted in neither the throughput figure nor the latency sample, so the
@@ -851,7 +861,7 @@ What this arithmetic **cannot** settle is `count=`. Little's Law has no payload 
 equally satisfied by 32 events per request and by 17. The July documents asserted `/log?count=30`
 on both planes; the harness records `count=15` for CloudHub 2.0; no raw output survives to
 adjudicate. That single unresolved parameter was enough on its own to make the July cross-plane
-comparison unpublishable — see §7, *Equalise the two planes*, for the protocol that removes it.
+comparison unpublishable — see §7, *Concurrency by plane*, for the protocol that removes it.
 
 The identity holds tightly on the two batch runs and only loosely on the two stock runs. The
 likely reason for the looser fit is request shedding: the CloudHub 1.0 stock run completed only
@@ -896,8 +906,9 @@ comparison then quietly violates.
 > per-request penalty is larger than the +605/+711 ms tabulated, not smaller — the direction of
 > the error is at least knowable even where its size is not. Read this whole subsection as
 > "there is a floor on CloudHub 2.0 worth investigating", which it supports, and not as "the
-> floor is 650 ms", which it does not. The re-run under §7 — both planes on plain `http` at
-> `-c 5` / `count=15` — is what supersedes it, and its figures are the ones to reason from.
+> floor is 650 ms", which it does not. The 2026-08-04 run under §7 — plain `http`, `count=20` on
+> both planes, `-c 10` on CloudHub 1.0 and `-c 5` on CloudHub 2.0, recorded per run — is what
+> supersedes it, and its figures are the ones to reason from.
 
 ### The region difference — falsified, not resolved
 
@@ -934,8 +945,9 @@ cheap they are to check. All are hypotheses; the measurements above are the evid
    container with a tenth of a core to spend. That is worth tens of milliseconds per request,
    not hundreds — a contributor, not the explanation — but it is a *known* asymmetry where the
    rest of this list is speculative. **Check:** it needs no check; it is settled. **Already
-   fixed:** §7 puts both planes on plain `http` at `-c 5` / `count=15` (§6 is where you confirm it
-   before measuring), so this asymmetry is gone from the published run. What it does *not* fix is
+   fixed:** §7 puts both planes on plain `http` at `count=20` — `-c 10` on CloudHub 1.0 and `-c 5`
+   on CloudHub 2.0 (§6 is where you confirm it before measuring), so this asymmetry is gone from
+   the published run. What it does *not* fix is
    the CPU-model difference in item 2, which is why the published surfaces still decline to read
    one plane's table against the other's.
 
@@ -943,7 +955,7 @@ cheap they are to check. All are hypotheses; the measurements above are the evid
    vCore worker has historically been able to burst above its nominal share on a shared host;
    a CloudHub 2.0 0.1 vCore replica is a container with a CPU limit enforced by the kernel
    scheduler, which hard-stops the container once its quota for the period is spent. This
-   workload is CPU-heavy for its size — at the protocol's `count=15`, 17 DataWeave-built JSON
+   workload is CPU-heavy for its size — at the protocol's `count=20`, the DataWeave-built JSON
    strings per request, plus layout rendering — so a hard cap would show up as exactly this kind
    of floor. (Compression is not part of that cost on either side of the A/B: both batch demos
    run `gzip="false"`, so every app in the comparison POSTs plaintext.)
@@ -1015,8 +1027,9 @@ to explain CH2 on its own.
    can see that both platforms were measured from the same distance.
 7. Record the **exact `oha` command line, the `count=` value, the URL scheme and the phase pairing
    for each plane**, and state that they were identical across every run. The published run does
-   say that — plain `http` at `-c 5` / `count=15` on both planes — so the parameter objection that
-   sank the July cross-plane reading no longer applies. **A cross-plane comparability claim still
+   say that — plain `http` at `count=20` on both planes, `-c 10` on CloudHub 1.0 and `-c 5` on
+   CloudHub 2.0 — so the payload objection that sank the July cross-plane reading no longer
+   applies (the concurrency still differs by plane, by design — §7). **A cross-plane comparability claim still
    may not appear anywhere** — not in `README.md`, not in `docs/index.html`, not in a chart
    subtitle or footnote — because the remaining obstacle is not the parameters but the **CPU
    model**: a burstable CloudHub 1.0 worker against a hard-capped CloudHub 2.0 replica. Each
@@ -1031,9 +1044,9 @@ to explain CH2 on its own.
 ### Throughput is not an independent result
 
 **Do not report requests per second as a second finding alongside latency.** The load in §7 is
-closed-loop: `oha -c 5` with no rate limit keeps exactly five requests in flight at all times,
-so the client cannot issue a request until an earlier one returns. Under that arrangement
-throughput is arithmetically pinned to latency —
+closed-loop: `oha -c <plane-conc>` with no rate limit keeps exactly `-c` requests in flight at all
+times (10 on CloudHub 1.0, 5 on CloudHub 2.0), so the client cannot issue a request until an
+earlier one returns. Under that arrangement throughput is arithmetically pinned to latency —
 `requests per second = concurrency ÷ mean latency` — and the tabulated check in §11 shows that
 identity reproducing the two batch results within rounding and the two stock results loosely,
 the looser fit being what shedding does to the arithmetic when a run does not complete every
@@ -1045,7 +1058,7 @@ The consequences for how a run is written up:
 
 - Present throughput as the **consequence** of the latency improvement, not as an additional,
   independently observed win. The sentence to write is "mean latency fell from *x* to *y*,
-  which at five concurrent connections is *z* requests per second", not "latency improved *and*
+  which at the plane's concurrency is *z* requests per second", not "latency improved *and*
   throughput improved".
 - A ratio quoted for throughput and a ratio quoted for mean latency are **the same number**.
   Do not sum them, average them, or list them as separate results. Quoting an "*n*× throughput
@@ -1070,19 +1083,19 @@ independent throughput claim.
 
 Things the July docs did not pin down. Decide each one now and write it into the report. Several
 entries that appeared here as unknowns have since been **closed** — by recovering the operator's
-harness, or by the 2026-08-03 re-run recording what it did; they are kept, marked, because the
+harness, or by the 2026-08-04 re-run recording what it did; they are kept, marked, because the
 resolution is the instruction.
 
 | Gap | Impact | Suggested resolution |
 | --- | --- | --- |
-| **The `oha` command line was nowhere in the repo.** Only "oha, 10 connections, 60 s" in the July prose. Flags for keep-alive, HTTP version, per-request timeout, rate limit and `-w` were all unrecorded. | A re-run with different defaults is not comparable. | **Closed.** The protocol is `oha --no-tui -z 1m -c 5 <url>/log?count=15` over plain `http`, oha defaults for everything else, no `-w`, text output. §7 carries it verbatim, and `README.md` and `docs/index.html` both publish it. |
-| **The warmup was described but not scripted.** "3 requests, 10 s pause" — sequential or concurrent? Same endpoint? Counted? | Minor, but it is the difference between a primed and an unprimed flusher. | **Closed.** 5 `curl --connect-timeout 15 --max-time 60` calls one after another to the same `/log?count=15` endpoint, discarded, then a 10 s pause; a 10 s settle after the measured minute. The July run used 3; 5 is what stopped first-run throughput swinging. §7. |
+| **The `oha` command line was nowhere in the repo.** Only "oha, 10 connections, 60 s" in the July prose. Flags for keep-alive, HTTP version, per-request timeout, rate limit and `-w` were all unrecorded. | A re-run with different defaults is not comparable. | **Closed.** The published protocol is `oha --no-tui -z 5m -w -c <plane-conc> <url>/log?count=20` over plain `http` (`-c 10` CloudHub 1.0, `-c 5` CloudHub 2.0), oha defaults for everything else, text output; the harness also runs Test 1 (`-z 1m`) and Test 4 (`-z 5m -t 30s`). §7 carries it verbatim, and `README.md` and `docs/index.html` both publish it. |
+| **The warmup was described but not scripted.** "3 requests, 10 s pause" — sequential or concurrent? Same endpoint? Counted? | Minor, but it is the difference between a primed and an unprimed flusher. | **Closed.** 5 `curl --connect-timeout 15 --max-time 60` calls one after another to the same `/log?count=20` endpoint, discarded, then a 10 s pause; a 10 s settle after the measured run. The July run used 3; 5 is what stopped first-run throughput swinging. §7. |
 | **Neither region is recorded.** Not for CH1, not for CH2, not for the load generator. | Was believed to be the single biggest reproducibility hole and the cause of the CH1-vs-CH2 gap. | **Closed, and the hypothesis it supported is falsified** — both planes were in the same region (§11). Still choose one region up front (§1), set it explicitly (§4), pick a CH2 space in it (§5), check the two match (§6) and record all three locations (§8), as hygiene. |
-| **The July load parameters were not the same on the two planes.** The harness drove CloudHub 1.0 at `-c 10` / `count=30` and CloudHub 2.0 at `-c 5` / `count=15`, and the two planes over different schemes. | Any cross-plane reading measures the parameter difference as much as the platform. | **Permanently open for the July figures, closed for the current ones.** Little's Law puts the July runs at `-c 10` (§11) but cannot resolve `count=`, and no raw output survives to settle it. The current protocol is `-c 5` / `count=15` over plain `http` on both planes (§7), recorded per run (§8). |
-| **Which run produced the July figures.** At least two Datadog runs exist and their numbers differ by up to 4× on CloudHub 2.0. | The July table cannot be traced to a procedure, only to prose. | **Unresolvable after the fact, and superseded.** The 2026-08-03 run is published with its parameters recorded; do not cite the July figures as a platform comparison, or as current. |
+| **The July load parameters were not the same on the two planes.** The harness drove CloudHub 1.0 at `-c 10` / `count=30` and CloudHub 2.0 at `-c 5` / `count=15`, and the two planes over different schemes. | Any cross-plane reading measures the parameter difference as much as the platform. | **Permanently open for the July figures, closed for the current ones.** Little's Law puts the July runs at `-c 10` (§11) but cannot resolve `count=`, and no raw output survives to settle it. The current protocol holds `count=20` over plain `http` on both planes, at `-c 10` on CloudHub 1.0 and `-c 5` on CloudHub 2.0 (§7), recorded per run (§8). |
+| **Which run produced the July figures.** At least two Datadog runs exist and their numbers differ by up to 4× on CloudHub 2.0. | The July table cannot be traced to a procedure, only to prose. | **Unresolvable after the fact, and superseded.** The 2026-08-04 run is published with its parameters recorded; do not cite the July figures as a platform comparison, or as current. |
 | **The vendor region is not recorded** in the report. The app config pins neither: the Datadog demos default to Datadog's primary intake host and read `dd.site` per deployment, the New Relic demos likewise read `nr.logHost`, so the intake used is a property of the run, not of the repo. | Intake latency and rate limits are region-specific. | State both in the report, and record the `dd.site` and `nr.logHost` values — each identical across its own pair (§3, §8). |
 | **No run log.** No raw oha output, no app logs, no timestamps are kept in the repo — nor beside the harness, whose results directory does not exist. | Nothing can be re-derived or audited, which is the reason several rows above can only be closed by re-running. | Save the JSON output and the appender heartbeat lines under `docs/benchmark-runs/` (gitignored if large), and keep them for as long as the figures are published. |
-| **The New Relic pair was never benchmarked** before the 2026-08-03 run. | The New Relic figures are a first measurement; there is no prior New Relic figure to reproduce or contradict. | **Closed.** The protocol now drives the New Relic pair in every phase (§7). Label its figures as a first measurement rather than a re-run, and do not read them against the Datadog pair (§12 item 8). |
+| **The New Relic pair was never benchmarked** before the 2026-08-04 run. | The New Relic figures are a first measurement; there is no prior New Relic figure to reproduce or contradict. | **Closed.** The protocol now drives the New Relic pair in every phase (§7). Label its figures as a first measurement rather than a re-run, and do not read them against the Datadog pair (§12 item 8). |
 | **The exact appender build is unidentified.** Version `0.1.3` covers at least two materially different builds. | Exactly the problem forcing this re-run. | Record the commit SHA — jar digests are per-build and identify nothing across builds (§2), so they are a build record, not an identifier. |
 | **CH2 deployment steps are undocumented.** The report says "0.1 vCore replica" and nothing else — no space, no ingress config, no port handling. | The CH2 half of the benchmark cannot be reproduced from the docs. | Write down the space, its region, the replica size, and the exact JVM args. |
 | **The `FILE` appender is CloudHub 1.0-shaped.** `/opt/mule/mule-CURRENT/logs/mule-${sys:domain}.log`, self-described in the config as the CH1 custom-log-appender convention. | On CH2 that path convention and the `domain` system property may not apply. If the path is unwritable, Log4j2 errors; if `${sys:domain}` does not resolve, Log4j2 writes it as a literal filename. Either way it is a CH2-only cost on the same 0.1 vCore, and it is a difference the report claims does not exist. | Check the CH2 startup log. If it misbehaves, either fix the path for CH2 or drop the `FILE` appender from **both** apps on **both** platforms — symmetrically. |

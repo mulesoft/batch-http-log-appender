@@ -42,3 +42,6 @@ velocity.log
 
 # ---- FastContext local tooling ----
 .fastcontext/
+
+# ---- Playwright MCP local session data ----
+.playwright-mcp/
