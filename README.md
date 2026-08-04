@@ -32,93 +32,79 @@ cd demo/java/benchmark && mvn exec:java
 
 Two batch/stock pairs — one shipping to **Datadog**, one to **New Relic** — were deployed to
 **both CloudHub 1.0 and CloudHub 2.0** (0.1 vCore each) and load-tested with
-[`oha`](https://github.com/hatoo/oha) at 5 concurrent connections for 60 s over plain `http`.
-Each request hits `/log?count=15`, emitting **17 log events** (a `batch.start`, 15
-`order.processed`, a `batch.completed`). Each app was primed with a 5-request warmup and a
-10 s pause before the measured run. The two vendors were driven **paired-parallel, one vendor
-per side**: a Datadog app and a New Relic app under load at the same instant, never two apps
-against the same intake, so no vendor's intake was ever loaded by two apps at once. All eight
-runs completed the full 60 s at **100% success**. Measured 2026-08-03. **Full report (charts,
-percentiles, config under test):** [`docs/index.html`](docs/index.html) (open it locally after
-cloning).
+[`oha`](https://github.com/hatoo/oha) over a **5-minute** sustained run. Each request hits
+`/log?count=20`, emitting **22 log events** (a `batch.start`, 20 `order.processed`, a
+`batch.completed`). Each app was restarted and warmed before the run. **Concurrency differs by
+plane — CloudHub 1.0 at `-c 10`, CloudHub 2.0 at `-c 5`** — because the CloudHub 2.0 replica is
+a capped-CPU, no-swap worker held at lower concurrency to stay off its OOM ceiling; **so
+compare only within a plane, never CloudHub 1.0 against CloudHub 2.0.** Every run finished at
+**100% success**. Measured 2026-08-04. **Full report (charts, percentiles, all four tests):**
+[`docs/benchmark-results.md`](docs/benchmark-results.md) (rendered natively on GitHub); the
+styled standalone view is [`docs/index.html`](docs/index.html) (open it locally after cloning).
 
-**Throughput gain, batch versus stock, within each vendor-and-platform pair:**
+**Throughput gain, batch versus stock, within each vendor-and-platform pair (5-minute run):**
 
 | Platform | Datadog | New Relic |
 |----------|--------:|----------:|
-| CloudHub 1.0 — 0.1 vCore worker | **15.97×** | **18.14×** |
-| CloudHub 2.0 — 0.1 vCore replica | **1.19×** | **3.82×** |
+| CloudHub 1.0 — 0.1 vCore worker (`-c 10`) | **55.5×** | **133.8×** |
+| CloudHub 2.0 — 0.1 vCore replica (`-c 5`) | **7.6×** | **55.9×** |
 
-**16–18× on CloudHub 1.0 for both vendors, 1.2–3.8× on CloudHub 2.0.** The vendor barely
-matters; the platform does. The likely explanation is that a CPU-capped CloudHub 2.0 replica
-is bottlenecked *upstream* of the appender — the cap, not the log shipping, sets the ceiling —
-while a CloudHub 1.0 worker leaves headroom that a synchronous appender cannot use and a
-batching one can. That is offered as the explanation the pattern fits, not as something these
-runs measured.
+The stock `<Http>` appender ships one synchronous POST per event on a single background
+flusher; under sustained concurrency that flusher never catches up, so its throughput
+collapses and its tail latency climbs into the multi-second — sometimes tens-of-seconds —
+range. The batch appender coalesces events and enqueues non-blocking, so request latency stays
+decoupled from intake latency.
 
-**CloudHub 1.0** — 0.1 vCore worker. Load windows `13:57:34Z–13:58:34Z` (batch pair) and
-`13:59:48Z–14:00:48Z` (stock pair):
+**CloudHub 1.0** — 0.1 vCore worker, `-c 10`, 5-minute run:
 
 | App | req/s | Requests | Mean | p50 | p90 | p99 |
 |-----|------:|---------:|-----:|----:|----:|----:|
-| **Datadog — batch 0.1.3** | **99.54** | **5,968** | **50 ms** | **35 ms** | **79 ms** | **235 ms** |
-| Datadog — stock `<Http>` | 6.23 | 369 | 774 ms | 115 ms | 2,460 ms | 9,492 ms |
-| **New Relic — batch 0.1.3** | **84.96** | **5,093** | **59 ms** | **35 ms** | **101 ms** | **265 ms** |
-| New Relic — stock `<Http>` | 4.68 | 276 | 893 ms | 109 ms | 238 ms | 19,627 ms |
+| **Datadog — batch 0.1.3** | **151.12** | **45,343** | **66 ms** | **52 ms** | **96 ms** | **304 ms** |
+| Datadog — stock `<Http>` | 2.72 | 840 | 3,630 ms | 323 ms | 11,504 ms | 14,857 ms |
+| **New Relic — batch 0.1.3** | **160.60** | **48,190** | **62 ms** | **52 ms** | **88 ms** | **238 ms** |
+| New Relic — stock `<Http>` | 1.20 | 421 | 7,725 ms | 386 ms | 22,649 ms | 55,227 ms |
 
-**CloudHub 2.0** — 0.1 vCore replica. Load windows `13:49:58Z–13:50:58Z` (batch pair) and
-`13:51:21Z–13:52:22Z` (stock pair):
+**CloudHub 2.0** — 0.1 vCore replica, `-c 5`, 5-minute run:
 
 | App | req/s | Requests | Mean | p50 | p90 | p99 |
 |-----|------:|---------:|-----:|----:|----:|----:|
-| **Datadog — batch 0.1.3** | **21.27** | **1,272** | **236 ms** | **204 ms** | **390 ms** | **678 ms** |
-| Datadog — stock `<Http>` | 17.86 | 1,067 | 281 ms | 229 ms | 471 ms | 1,105 ms |
-| **New Relic — batch 0.1.3** | **16.44** | **982** | **304 ms** | **275 ms** | **485 ms** | **1,474 ms** |
-| New Relic — stock `<Http>` | 4.30 | 253 | 1,028 ms | 346 ms | 1,009 ms | 22,036 ms |
+| **Datadog — batch 0.1.3** | **43.53** | **13,060** | **115 ms** | **96 ms** | **200 ms** | **503 ms** |
+| Datadog — stock `<Http>` | 5.75 | 1,741 | 867 ms | 211 ms | 4,738 ms | 7,367 ms |
+| **New Relic — batch 0.1.3** | **42.57** | **12,774** | **117 ms** | **96 ms** | **202 ms** | **513 ms** |
+| New Relic — stock `<Http>` | 0.76 | 248 | 6,400 ms | 481 ms | 23,037 ms | 34,612 ms |
 
 Each pair is a batch-versus-stock contrast within one vendor on one platform; the two tables
-are not a controlled comparison of each other (see the caveats below). The stock appender's
-synchronous per-event send holds the request thread for the full round-trip to the intake, so
-under concurrency the worker's small thread pool saturates and its tail latency blows out: on
-three of the four stock runs p99 lands between **9.5 s and 22 s**, against batch p99s of 235 ms
-to 1.5 s. The batch appender enqueues non-blocking, so request latency stays decoupled from
-intake latency. The exception is the CloudHub 2.0 Datadog pair, where the stock run holds a
-p99 of 1,105 ms and both apps sit close together — consistent with both hitting a ceiling that
-is not the appender.
+are not a controlled comparison of each other (different concurrency, different CPU models —
+see the caveats below). Across all four stock runs the p99 tail lands between **7 s and 55 s**,
+against batch p99s of 238 ms to 513 ms.
 
-Every run validates against Little's Law — requests/sec × mean latency ≈ the concurrency of
-5 — to within 0.1–16%, so the load parameters are corroborated by the results rather than
-merely asserted. Three runs needed a ×10 latency correction for a known
-[`oha` 1.14.0](https://github.com/hatoo/oha) unit-selection defect, which prints a
-`0.0774 10 sec`-style value where it means `0.774 sec`; the figures above are already
-corrected.
+Every run validates against Little's Law — requests/sec × mean latency ≈ the plane's
+concurrency — so the load parameters are corroborated by the results rather than merely
+asserted. Latency figures from [`oha` 1.14.0](https://github.com/hatoo/oha) may carry a ×10
+unit-selection display glitch, which prints a `0.0774 10 sec`-style value where it means
+`0.774 sec`; the figures above are already normalised (the correction touches latency only,
+not request counts or requests/sec).
 
 **Read all of this as directional.** Every caveat below ships with the figures:
 
 - **One run per pair, no median.** These are single measurements, not repeated ones. The
   pattern is directional, not established.
-- **Roughly 2× run-to-run variance has been observed on CloudHub 1.0** across repeated
-  passes. The CloudHub 2.0 Datadog figure of **1.19× is inside that band**, so treat it as
-  directional only — it is not distinguishable from noise on this evidence. The variance is
-  stated as observed; its cause is not established here.
-- **The CloudHub 1.0 workers were freshly deployed with no accumulated burst balance**, so
-  those runs measured baseline CPU rather than burst headroom. That makes 16–18× a **floor**
-  rather than a flattering peak — the opposite of the usual suspicion about burstable workers.
+- **⚠ Cold-start caveat.** The batch appender is CPU/JIT-bound and warmup-sensitive, so a
+  **1-minute** run under-reports its warm throughput (e.g. CloudHub 2.0 Datadog batch rises
+  **13.8 → 43.5 req/s** from a 1-minute run to the 5-minute run above as the fixed cold-start
+  cost amortises). The 5-minute figures above are the better read of sustained warm throughput;
+  the full report shows the 1-minute Test 1, the in-thread churn window, this 5-minute Test 3,
+  and a 30s-cap Test 4 side by side.
+- **Concurrency differs by plane** (CH1 `-c 10`, CH2 `-c 5`), so the two tables are not a
+  controlled comparison of each other. The next benchmark round plans to even concurrency
+  across planes.
 - **`gzip` and `spillEnabled` were disabled in the demos**, so this measures batching in
   isolation rather than the appender as it would be deployed. Compression is off precisely
   because the stock `<Http>` appender cannot compress and leaving it on would vary two things
   at once; a production deployment should leave both on.
-- **Compare within a plane, not across.** CloudHub 1.0 and 2.0 have different CPU models —
-  burstable versus hard-capped — so the two tables above are not a controlled comparison of
-  each other, whatever else was held constant between them.
 - **Throughput and mean latency are one measurement, not two.** The load is closed-loop
-  (`oha -c 5`, no rate limit), so requests per second is the arithmetic consequence of mean
+  (`oha` with no rate limit), so requests per second is the arithmetic consequence of mean
   latency, not an independent win. The percentiles are unaffected.
-- **One observed and unexplained artifact.** On both CloudHub 1.0 batch apps, exactly five
-  requests — matching the concurrency — stalled together for several seconds and then
-  recovered (near 4.4 s on the Datadog app, near 6.1 s on the New Relic one), against medians
-  of 35 ms. It is five requests in roughly five thousand and moves neither the medians nor the
-  ratios. Reported as observed; the cause is unexplained.
 
 ### Ingest lag: generation → arrival in Datadog
 
