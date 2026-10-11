@@ -86,16 +86,22 @@ public final class HttpTransport implements AutoCloseable {
          * instead of hammering with our own guess.
          */
         public final long retryAfterMillis;
+        /**
+         * Body of a 2xx response, kept only for a sink that {@linkplain LogSink#reportsPerRecordResults()
+         * reports per-record results}; {@code null} otherwise and on every non-2xx outcome.
+         */
+        public final byte[] body;
 
         Outcome(Result result, int statusCode, String detail) {
-            this(result, statusCode, detail, -1L);
+            this(result, statusCode, detail, -1L, null);
         }
 
-        Outcome(Result result, int statusCode, String detail, long retryAfterMillis) {
+        Outcome(Result result, int statusCode, String detail, long retryAfterMillis, byte[] body) {
             this.result = result;
             this.statusCode = statusCode;
             this.detail = detail;
             this.retryAfterMillis = retryAfterMillis;
+            this.body = body;
         }
     }
 
@@ -263,13 +269,18 @@ public final class HttpTransport implements AutoCloseable {
                 req.header("Content-Encoding", "gzip");
             }
 
-            HttpResponse<Void> resp = client.send(req.build(), HttpResponse.BodyHandlers.discarding());
+            // Read the body only when the sink will interpret it; every other intake's body is
+            // discarded unread, exactly as before.
+            HttpResponse<byte[]> resp = client.send(req.build(), sink.reportsPerRecordResults()
+                    ? HttpResponse.BodyHandlers.ofByteArray()
+                    : HttpResponse.BodyHandlers.replacing(null));
             int status = resp.statusCode();
             Result result = classify(status);
             long retryAfter = result == Result.RETRYABLE
                     ? parseRetryAfter(resp.headers().firstValue("Retry-After").orElse(null))
                     : -1L;
-            return new Outcome(result, status, "HTTP " + status, retryAfter);
+            byte[] body = result == Result.SUCCESS ? resp.body() : null;
+            return new Outcome(result, status, "HTTP " + status, retryAfter, body);
         } catch (java.io.IOException e) {
             // connection reset, timeout, DNS, etc. — transient, retry
             return new Outcome(Result.RETRYABLE, 0, Diagnostics.describe(e));

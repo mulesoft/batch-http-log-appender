@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Mule application Log4j2 configuration — STOCK HttpAppender variant (A/B control).
+
+  This is the ONLY file that differs in substance from mule-elastic-demo. Instead of
+  our batching <BatchHttp> appender, it uses Log4j2's built-in <Http> appender, which
+  performs ONE SYNCHRONOUS HTTP POST PER LOG EVENT — here to the single-document
+  index API (POST /<data-stream>/_doc). There is no batching, no in-memory queue
+  coalescing, no gzip option, no disk-spill — every event is its own round-trip.
+
+  Endpoint and key injection (identical chains to the batch sibling):
+    url    ${sys:ELASTIC_URL:-${sys:elastic.url:-${env:ELASTIC_URL:-https://set-elastic-url.invalid}}}
+    apiKey ${sys:ELASTIC_API_KEY:-${sys:elastic.apiKey:-${env:ELASTIC_API_KEY:-MISSING_KEY}}}
+  To measure against a local mock intake instead, start the runtime with
+  -Delastic.docUrl=http://localhost:9099/logs-mule-default/_doc, which replaces the whole URL.
+
+  NOTE: the stock <Http> appender is part of log4j-core, which the Mule runtime provides
+  on its container classloader. There is NO custom plugin here, so (unlike the batch app)
+  the <Configuration> needs no `packages` scan attribute.
+-->
+<Configuration status="WARN">
+
+    <Properties>
+        <!-- Same properties, chains and defaults as the batch sibling — see its log4j2.xml for
+             the reasoning behind each. The stock <Http> appender has no service/host/index
+             attributes, so these are injected into the PatternLayout and the URL below.
+               app.service  defaults to this app's own name, the only field that separates the
+                            pair in the shared data stream. Delete an override, don't clear it:
+                            a present-but-empty property beats the ${sys:x:-default} default.
+               es.host      ${sys:domain} (the CloudHub 1.0 app name), falling through to the
+                            container hostname off CH1 — on CH2 the pod. -->
+        <Property name="app.service">${sys:app.service:-elastic-stock-http}</Property>
+        <Property name="es.host">${sys:domain:-${env:HOSTNAME:-${hostName}}}</Property>
+        <Property name="app.platform">${sys:app.platform:-${env:APP_PLATFORM:-unspecified}}</Property>
+        <Property name="es.url">${sys:ELASTIC_URL:-${sys:elastic.url:-${env:ELASTIC_URL:-https://set-elastic-url.invalid}}}</Property>
+        <Property name="es.dataStream">${sys:elastic.dataStream:-logs-mule-default}</Property>
+    </Properties>
+
+    <Appenders>
+        <!-- CloudHub 1.0 custom log appender — IDENTICAL to the batch sibling (same path,
+             same layout, same rollover) so the only difference in the pair is the vendor
+             appender. See https://docs.mulesoft.com/cloudhub/custom-log-appender -->
+        <RollingFile name="FILE"
+                     fileName="/opt/mule/mule-CURRENT/logs/mule-${sys:domain}.log"
+                     filePattern="/opt/mule/mule-CURRENT/logs/mule-${sys:domain}-%i.log">
+            <PatternLayout pattern="[%d{MM-dd HH:mm:ss.SSS}] %-5p %c{1} [%t]: %m%n"/>
+            <DefaultRolloverStrategy max="10"/>
+            <Policies>
+                <SizeBasedTriggeringPolicy size="10 MB" />
+            </Policies>
+        </RollingFile>
+
+        <!--
+          STOCK Log4j2 HttpAppender: one blocking POST per event to the index API.
+            url          : ${es.url}/${es.dataStream}/_doc — the same project and data stream as
+                           the batch sibling. A data stream accepts POST /<stream>/_doc (an
+                           auto-id create). -Delastic.docUrl replaces the whole URL, for a mock intake.
+            *TimeoutMillis: matched to the batch app's requestTimeoutMillis (10s) for fairness.
+            <Property>   : request headers. `Authorization: ApiKey <encoded>` authenticates;
+                           Content-Type=application/json because the body IS one JSON document.
+
+          The layout spells out, field for field, the ECS document the batch sibling's sink
+          builds from the Log4j2 event: @timestamp (the event time, UTC, millisecond precision —
+          data streams require it), message, log.level, log.logger, process.thread.name,
+          service.name, host.name, and the two MDC entries Mule sets on every <logger> event as
+          labels.correlationId / labels.processorPath.
+
+          `message` is the SAME single-line string the batch sibling ships: its layout prepends
+          {"platform":"…", to the flow's collapsed JSON; here that string is embedded as a JSON
+          string value, so the quotes in the literal prefix are written \\&quot; (Log4j2 turns
+          \\ into one backslash) and the flow's part is escaped by %enc{…}{JSON}. The \x7B in the
+          %replace regex is the hex-escaped leading brace, so Log4j2's brace-counting does not
+          miscount. Neither app asks Elasticsearch to parse the JSON inside `message`; the
+          README's optional logs@custom pipeline does that for both alike.
+          The batch sibling omits a label whose MDC key is absent; %X{…} renders an empty string
+          instead. Mule sets both keys on every flow <logger> event, so in practice they match.
+        -->
+        <Http name="elastic"
+              url="${sys:elastic.docUrl:-${es.url}/${es.dataStream}/_doc}"
+              connectTimeoutMillis="10000"
+              readTimeoutMillis="10000">
+            <Property name="Authorization"
+                      value="ApiKey ${sys:ELASTIC_API_KEY:-${sys:elastic.apiKey:-${env:ELASTIC_API_KEY:-MISSING_KEY}}}"/>
+            <Property name="Content-Type" value="application/json"/>
+            <PatternLayout pattern="{&quot;@timestamp&quot;:&quot;%d{yyyy-MM-dd'T'HH:mm:ss.SSS'Z'}{UTC}&quot;,&quot;message&quot;:&quot;{\\&quot;platform\\&quot;:\\&quot;${app.platform}\\&quot;,%enc{%replace{%m}{^\x7B\s*|[\r\n]+\s*}{}}{JSON}&quot;,&quot;log.level&quot;:&quot;%p&quot;,&quot;log.logger&quot;:&quot;%c&quot;,&quot;process.thread.name&quot;:&quot;%t&quot;,&quot;service.name&quot;:&quot;${app.service}&quot;,&quot;host.name&quot;:&quot;${es.host}&quot;,&quot;labels.correlationId&quot;:&quot;%X{correlationId}&quot;,&quot;labels.processorPath&quot;:&quot;%X{processorPath}&quot;}"/>
+        </Http>
+    </Appenders>
+
+    <Loggers>
+        <!--
+          IDENTICAL logger wiring to the batch app (AsyncLogger, same category, additivity,
+          same file appender) so the appender is the only variable. With the stock appender
+          behind an AsyncLogger, the disruptor's single background thread must serialize one
+          blocking POST per event — so the backlog and back-pressure you observe IS the cost
+          of not batching.
+        -->
+        <AsyncLogger name="com.mulesoft.support.batchhttp.muledemo" level="INFO" additivity="false">
+            <AppenderRef ref="elastic"/>
+            <AppenderRef ref="FILE"/>
+        </AsyncLogger>
+
+        <!-- Framework noise-reduction categories, copied from the CloudHub doc — identical to
+             the batch sibling so the logger wiring stays constant across the A/B pair. -->
+        <AsyncLogger name="com.gigaspaces" level="ERROR"/>
+        <AsyncLogger name="com.j_spaces" level="ERROR"/>
+        <AsyncLogger name="com.sun.jini" level="ERROR"/>
+        <AsyncLogger name="net.jini" level="ERROR"/>
+        <AsyncLogger name="org.apache" level="WARN"/>
+        <AsyncLogger name="org.apache.cxf" level="WARN"/>
+        <AsyncLogger name="org.springframework.beans.factory" level="WARN"/>
+        <AsyncLogger name="org.mule" level="INFO"/>
+        <AsyncLogger name="com.mulesoft" level="INFO"/>
+        <AsyncLogger name="org.jetel" level="WARN"/>
+        <AsyncLogger name="Tracking" level="WARN"/>
+
+        <!-- Root carries the FILE appender ONLY — identical to the batch sibling. Here the
+             layout output IS the POST body, so a plain-text framework line would still be a
+             valid document but with a garbled `message`; keeping the vendor path to the
+             application logger keeps both apps' documents the same shape. -->
+        <AsyncRoot level="INFO">
+            <AppenderRef ref="FILE"/>
+        </AsyncRoot>
+    </Loggers>
+</Configuration>

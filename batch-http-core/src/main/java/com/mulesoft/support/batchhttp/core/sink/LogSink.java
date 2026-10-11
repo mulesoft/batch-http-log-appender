@@ -46,6 +46,42 @@ public interface LogSink {
     default String name() { return getClass().getSimpleName(); }
 
     /**
+     * Whether a 2xx response can still reject individual records. Most intakes accept or refuse
+     * a request as a whole, but Elasticsearch's {@code _bulk} answers 200 and reports a status
+     * per document. When true the transport keeps the 2xx response body and the engine hands it
+     * to {@link #inspectResponse}; when false (the default) the body is discarded unread.
+     */
+    default boolean reportsPerRecordResults() { return false; }
+
+    /**
+     * Per-record verdict for the 2xx response {@code body} of a batch of {@code batchSize}
+     * records. Only called when {@link #reportsPerRecordResults()} is true. A body that cannot
+     * be interpreted should count as accepted: re-sending on a guess would duplicate records
+     * the intake may well have stored.
+     */
+    default RecordResults inspectResponse(byte[] body, int batchSize) { return RecordResults.ALL_ACCEPTED; }
+
+    /** Which records of an accepted request the intake nevertheless refused, and whether to re-send them. */
+    final class RecordResults {
+        public static final RecordResults ALL_ACCEPTED = new RecordResults(new int[0], 0, null);
+
+        /** Positions (ascending, into the sent batch) of records refused transiently — re-send only these. */
+        public final int[] retryable;
+        /** Number of records refused permanently (e.g. a field-mapping conflict) — re-sending will not help. */
+        public final int rejected;
+        /** Reason for the first permanent refusal, for diagnostics; null when there was none. */
+        public final String rejectedDetail;
+
+        public RecordResults(int[] retryable, int rejected, String rejectedDetail) {
+            this.retryable = retryable;
+            this.rejected = rejected;
+            this.rejectedDetail = rejectedDetail;
+        }
+
+        public boolean allAccepted() { return retryable.length == 0 && rejected == 0; }
+    }
+
+    /**
      * Hard limits enforced by the intake API. The engine flushes before crossing any of
      * these, taking {@code min(config value, this limit)} for each (see
      * {@code BatchingLogShipper}). A vendor with no explicit record ceiling passes
