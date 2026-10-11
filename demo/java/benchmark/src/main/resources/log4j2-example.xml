@@ -65,7 +65,20 @@
                    lingerMillis="1000"
                    gzip="true"/>
 
-        <!-- Any other HTTP intake (Elasticsearch-ish, Loki HTTP, in-house collector). -->
+        <!-- Elasticsearch Bulk API (ELK, Elastic Cloud Hosted or Serverless). `url` is the
+             Elasticsearch endpoint and the API key the "encoded" value Kibana shows once; it
+             needs create_doc + auto_configure on the data stream. Set ELASTIC_URL and
+             ELASTIC_API_KEY in the environment. `index` is the data stream (default
+             logs-mule-default). -->
+        <BatchHttp name="elastic"
+                   vendor="elasticsearch"
+                   url="${env:ELASTIC_URL}"
+                   apiKey="${env:ELASTIC_API_KEY}"
+                   index="logs-mule-default"
+                   lingerMillis="1000"
+                   gzip="true"/>
+
+        <!-- Any other HTTP intake (Loki HTTP, in-house collector). -->
         <BatchHttp name="generic"
                    vendor="generic"
                    url="https://logs.internal.example.com/ingest"

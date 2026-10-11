@@ -10,7 +10,7 @@ CLI=${ANYPOINT_CLI:-anypoint-cli-v4}
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 DEPLOYABLE_DIR="$REPO_ROOT/demo/mule/deployable"
 
-# Runbook §4 / §6: 1 worker x 0.1 vCore, runtime 4.9.15 on Java 17, identical for all four apps.
+# Runbook §4 / §6: 1 worker x 0.1 vCore, runtime 4.9.15 on Java 17, identical for every app.
 WORKERS=1
 WORKER_SIZE=0.1
 RUNTIME=4.9.15
@@ -43,10 +43,11 @@ SUFFIX=${CH1_APP_SUFFIX:-}
 
 DATADOG_APPS=("datadog-batch-http$SUFFIX" "datadog-stock-http$SUFFIX")
 NEWRELIC_APPS=("newrelic-batch-http$SUFFIX" "newrelic-stock-http$SUFFIX")
+ELASTIC_APPS=("elastic-batch-http$SUFFIX" "elastic-stock-http$SUFFIX")
 
 usage() {
   cat <<'EOF'
-Usage: scripts/deploy-ch1.sh [--dry-run] [--datadog | --newrelic | --all] [APP ...]
+Usage: scripts/deploy-ch1.sh [--dry-run] [--datadog | --newrelic | --elastic | --all] [APP ...]
 
 Deploys (or redeploys) the CloudHub 1.0 benchmark applications per docs/benchmark-runbook.md §4.
 
@@ -54,14 +55,15 @@ App names are the demo module names plus $CH1_APP_SUFFIX. On CloudHub 1.0 the ap
 public hostname label, so targeting the wrong name deploys a parallel app instead of redeploying
 the existing one -- set CH1_APP_SUFFIX to whatever the already-deployed apps use.
 
-Only the vendor credential is passed as a --property. Set app.platform=cloudhub-1.0 by hand in
+Only the vendor credential is passed as a --property (plus elastic.url for an elastic-* app). Set app.platform=cloudhub-1.0 by hand in
 Runtime Manager's Properties tab, or the events arrive labelled platform: unspecified and the
 two planes are indistinguishable at the vendor.
 
 Selection (default: the Datadog pair):
   --datadog          datadog-batch-http$SUFFIX  datadog-stock-http$SUFFIX   (default)
   --newrelic         newrelic-batch-http$SUFFIX newrelic-stock-http$SUFFIX
-  --all              all four
+  --elastic          elastic-batch-http$SUFFIX  elastic-stock-http$SUFFIX
+  --all              the Datadog and New Relic pairs (the published benchmark)
   APP ...            explicit app names, overriding the flags above
                      (or set APPS="datadog-batch-http-x datadog-stock-http-x" in the environment)
 
@@ -77,6 +79,8 @@ Required environment:
   REGION                   the single region chosen in runbook §1, as an AWS-style region name
   DD_KEY                   Datadog API key      (required when deploying a datadog-* app)
   NR_KEY                   New Relic ingest key (required when deploying a newrelic-* app)
+  ELASTIC_URL              Elasticsearch endpoint (required when deploying an elastic-* app)
+  ELASTIC_KEY              Elasticsearch encoded API key (required when deploying an elastic-* app)
 
 Optional environment:
   CH1_APP_SUFFIX           suffix the deployed CloudHub 1.0 apps carry; default empty
@@ -110,6 +114,7 @@ while [ $# -gt 0 ]; do
     --dry-run)  DRY_RUN=1 ;;
     --datadog)  selection=datadog ;;
     --newrelic) selection=newrelic ;;
+    --elastic)  selection=elastic ;;
     --all)      selection=all ;;
     -h|--help)  usage; exit 0 ;;
     -*)         usage >&2; die "unknown option: $1" ;;
@@ -126,6 +131,7 @@ elif [ -n "${APPS:-}" ]; then
 else
   case "$selection" in
     newrelic) APPS_TO_DEPLOY=("${NEWRELIC_APPS[@]}") ;;
+    elastic)  APPS_TO_DEPLOY=("${ELASTIC_APPS[@]}") ;;
     all)      APPS_TO_DEPLOY=("${DATADOG_APPS[@]}" "${NEWRELIC_APPS[@]}") ;;
     *)        APPS_TO_DEPLOY=("${DATADOG_APPS[@]}") ;;
   esac
@@ -142,6 +148,8 @@ app_jar() {
     datadog-stock-http*)  printf '%s' "$DEPLOYABLE_DIR/datadog-stock-http.jar" ;;
     newrelic-batch-http*) printf '%s' "$DEPLOYABLE_DIR/newrelic-batch-http.jar" ;;
     newrelic-stock-http*) printf '%s' "$DEPLOYABLE_DIR/newrelic-stock-http.jar" ;;
+    elastic-batch-http*)  printf '%s' "$DEPLOYABLE_DIR/elastic-batch-http.jar" ;;
+    elastic-stock-http*)  printf '%s' "$DEPLOYABLE_DIR/elastic-stock-http.jar" ;;
     *) return 1 ;;
   esac
 }
@@ -150,6 +158,7 @@ app_property_name() {
   case "$1" in
     datadog-*)  printf 'datadog.apiKey' ;;
     newrelic-*) printf 'newrelic.apiKey' ;;
+    elastic-*)  printf 'elastic.apiKey' ;;
     *) return 1 ;;
   esac
 }
@@ -158,6 +167,7 @@ app_secret() {
   case "$1" in
     datadog-*)  printf '%s' "${DD_KEY:-}" ;;
     newrelic-*) printf '%s' "${NR_KEY:-}" ;;
+    elastic-*)  printf '%s' "${ELASTIC_KEY:-}" ;;
     *) return 1 ;;
   esac
 }
@@ -182,15 +192,18 @@ require_var REGION
 
 need_dd=0
 need_nr=0
+need_es=0
 for app in "${APPS_TO_DEPLOY[@]}"; do
-  app_jar "$app" >/dev/null || die "unknown app '$app' (known: ${DATADOG_APPS[*]} ${NEWRELIC_APPS[*]})"
+  app_jar "$app" >/dev/null || die "unknown app '$app' (known: ${DATADOG_APPS[*]} ${NEWRELIC_APPS[*]} ${ELASTIC_APPS[*]})"
   case "$app" in
     datadog-*)  need_dd=1 ;;
     newrelic-*) need_nr=1 ;;
+    elastic-*)  need_es=1 ;;
   esac
 done
 [ "$need_dd" -eq 1 ] && require_var DD_KEY
 [ "$need_nr" -eq 1 ] && require_var NR_KEY
+[ "$need_es" -eq 1 ] && require_var ELASTIC_URL && require_var ELASTIC_KEY
 
 if [ ${#missing[@]} -gt 0 ]; then
   printf 'ERROR: the following required environment variables are unset or empty:\n' >&2
@@ -289,9 +302,14 @@ describe_json() {
 deploy_one() {
   local app=$1
   local jar prop secret verb
+  local extra=()
   jar="$(app_jar "$app")"
   prop="$(app_property_name "$app")"
   secret="$(app_secret "$app")"
+  # Elasticsearch is the one intake with no fixed host: the endpoint is per project.
+  case "$app" in
+    elastic-*) extra=(--property "elastic.url:$ELASTIC_URL") ;;
+  esac
 
   # deploy creates; it errors on an app that already exists. Re-running the benchmark five
   # times means most invocations are updates, so branch to modify when the app is already there.
@@ -312,7 +330,7 @@ deploy_one() {
     --workers "$WORKERS" --workerSize "$WORKER_SIZE" \
     --runtime "$RUNTIME" --javaVersion "$JAVA_VERSION" \
     --region "$REGION" \
-    --property "$prop:$secret"
+    --property "$prop:$secret" ${extra[@]+"${extra[@]}"}
 }
 
 wait_started() {
@@ -378,6 +396,7 @@ CloudHub 1.0 benchmark deploy (docs/benchmark-runbook.md §4)
   client secret : $MASK
   datadog key   : $([ "$need_dd" -eq 1 ] && printf '%s' "$MASK" || printf 'n/a')
   newrelic key  : $([ "$need_nr" -eq 1 ] && printf '%s' "$MASK" || printf 'n/a')
+  elastic key   : $([ "$need_es" -eq 1 ] && printf '%s' "$MASK" || printf 'n/a')
   apps          : ${APPS_TO_DEPLOY[*]}
   mode          : $([ "$DRY_RUN" -eq 1 ] && printf 'DRY RUN' || printf 'live')
 

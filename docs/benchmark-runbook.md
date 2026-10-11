@@ -223,7 +223,8 @@ The resolution chain in both apps is
 works. Prefer the JVM arg on CloudHub.
 
 > **`app.platform` must be set by hand in Runtime Manager on CloudHub 1.0.**
-> `scripts/deploy-ch1.sh` passes exactly **one** `--property` — the vendor key — so an app
+> `scripts/deploy-ch1.sh` passes only the vendor key as a `--property` (plus `elastic.url` for
+> the Elasticsearch pair) — so an app
 > deployed through it reports `platform: unspecified` until you add `app.platform` yourself in
 > Runtime Manager's **Properties** tab (CloudHub 1.0 surfaces those as JVM system properties) and
 > restart. Do that for **every** CloudHub 1.0 app you deploy through the script — both halves of
@@ -262,17 +263,19 @@ once with `anypoint-cli-v4 conf` or the `ANYPOINT_*` environment variables.
 assertion, the hostname capture below, and polling until each app reports `STARTED`:
 
 ```bash
-scripts/deploy-ch1.sh [--dry-run] [--datadog | --newrelic | --all] [APP ...]
+scripts/deploy-ch1.sh [--dry-run] [--datadog | --newrelic | --elastic | --all] [APP ...]
 ```
 
 It defaults to the Datadog pair, and reads `ANYPOINT_CLIENT_ID`, `ANYPOINT_CLIENT_SECRET`,
 `ANYPOINT_ORG`, `ANYPOINT_ENV`, `REGION` and `DD_KEY` from the environment (`NR_KEY` only when a
-New Relic app is selected). The published protocol needs **both** vendor pairs on this plane, so
-run it with **`--all`** and both keys exported. `--dry-run` prints the exact commands with secrets
+New Relic app is selected; `ELASTIC_URL` and `ELASTIC_KEY` only for `--elastic`). The published
+protocol needs **both** vendor pairs on this plane, so run it with **`--all`** (the Datadog and New
+Relic pairs) and both keys exported. `--dry-run` prints the exact commands with secrets
 masked. The explicit commands below stay in the runbook regardless: they document what the script
 does, and you need them for the CloudHub 2.0 side and for debugging.
 
-Note what the script does **not** do: it passes a single `--property`, the vendor credential, so
+Note what the script does **not** do: it passes only the vendor credential as a `--property` (plus `elastic.url` for the
+Elasticsearch pair), so
 every app it deploys still needs `app.platform` set by hand afterwards (§3).
 
 > **Target the apps that are already deployed, or you will benchmark a parallel copy.** The
@@ -497,7 +500,7 @@ a speculative one, and each is something the published protocol deliberately fix
       both halves and is *not* a discriminator; every Datadog query in §9 filters on `service`.
 - [ ] **`app.platform` set on every app** — `cloudhub-1.0` on each CH1 app, `cloudhub-2.0` on
       each CH2 app. Unset it reads `unspecified` and the two planes become indistinguishable in
-      the backend. The scripted CH1 deploy passes only one `--property`, so on CloudHub 1.0 it
+      the backend. The scripted CH1 deploy passes only the vendor credential (and `elastic.url`), so on CloudHub 1.0 it
       **must be set by hand** in Runtime Manager's Properties tab and the app restarted (§3);
       on CloudHub 2.0 it goes in at deploy time (§5).
 - [ ] **Run the A/B pair in adjacent phases of the same window**, batch phase then stock phase,

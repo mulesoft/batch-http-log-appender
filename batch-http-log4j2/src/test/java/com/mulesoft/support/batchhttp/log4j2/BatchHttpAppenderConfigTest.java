@@ -156,6 +156,65 @@ class BatchHttpAppenderConfigTest {
     }
 
     @Test
+    void elasticsearchWithoutUrlOrApiKeyFailsToBuildAndNamesBothRequiredAttributes(@TempDir Path dir) throws Exception {
+        LoggerContext c = configure(dir, config(
+                "    <BatchHttp name=\"underTest\" vendor=\"elasticsearch\" service=\"orders\">\n"
+                        + "      <PatternLayout pattern=\"%m\"/>\n"
+                        + "    </BatchHttp>\n"));
+
+        assertNull(c.getConfiguration().getAppender("underTest"),
+                "an appender with no url and no apiKey must not be built");
+
+        String errors = listener.errors();
+        assertTrue(errors.contains("url") && errors.contains("apiKey"),
+                "the diagnostic must name both required attributes, got:\n" + errors);
+        assertTrue(errors.contains("elasticsearch"),
+                "the diagnostic must name the vendor, got:\n" + errors);
+    }
+
+    /** {@code vendor="elk"} posts _bulk to {@code <url>/<index>/_bulk} with an ApiKey header. */
+    @Test
+    void elkAliasShipsBulkToTheConfiguredDataStream(@TempDir Path dir) throws Exception {
+        StringBuilder auth = new StringBuilder();
+        server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/logs-orders-test/_bulk", exchange -> {
+            try {
+                String received = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                synchronized (body) {
+                    body.append(received);
+                    auth.append(exchange.getRequestHeaders().getFirst("Authorization"));
+                }
+                byte[] ok = "{\"errors\":false}".getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(200, ok.length);
+                exchange.getResponseBody().write(ok);
+            } finally {
+                exchange.close();
+            }
+        });
+        server.start();
+        System.setProperty("batchhttp.cfg.url", "http://127.0.0.1:" + server.getAddress().getPort());
+
+        LoggerContext c = configure(dir, config(
+                "    <BatchHttp name=\"underTest\" vendor=\"elk\" url=\"${sys:batchhttp.cfg.url}\"\n"
+                        + "               apiKey=\"encoded-key\" index=\"logs-orders-test\" service=\"orders\"\n"
+                        + "               lingerMillis=\"100\" gzip=\"false\" spillEnabled=\"false\">\n"
+                        + "      <PatternLayout pattern=\"%m\"/>\n"
+                        + "    </BatchHttp>\n"));
+
+        BatchHttpAppender appender = c.getConfiguration().getAppender("underTest");
+        assertNotNull(appender, "the appender must build");
+        c.getLogger("com.mulesoft.support.batchhttp.cfg").info("order placed");
+        appender.stop();
+
+        synchronized (body) {
+            assertEquals("ApiKey encoded-key", auth.toString());
+            assertTrue(body.toString().startsWith("{\"create\":{}}\n{\"@timestamp\":"), body.toString());
+            assertTrue(body.toString().contains("\"message\":\"order placed\""), body.toString());
+            assertTrue(body.toString().contains("\"service.name\":\"orders\""), body.toString());
+        }
+    }
+
+    @Test
     void aValidConfigStillBuildsAndLogsNoStartupError(@TempDir Path dir) throws Exception {
         LoggerContext c = configure(dir, config(
                 "    <BatchHttp name=\"underTest\" vendor=\"datadog\" apiKey=\"secret\" service=\"orders\"\n"

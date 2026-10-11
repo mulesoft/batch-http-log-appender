@@ -26,8 +26,9 @@ import java.util.Map;
 /**
  * Catch-all sink for "any other HTTP based logging endpoint". POSTs the batch
  * either as a JSON array or as newline-delimited JSON (NDJSON), with fully
- * configurable URL and headers. Use this for Elasticsearch bulk-ish intakes,
- * Loki-style HTTP receivers, in-house collectors, etc.
+ * configurable URL and headers. Use this for Loki-style HTTP receivers, in-house
+ * collectors, etc. For Elasticsearch use {@link ElasticsearchSink}, which frames the
+ * Bulk API and reads its per-document results.
  */
 public final class GenericNdjsonSink extends AbstractHttpSink {
 

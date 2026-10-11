@@ -1,0 +1,15 @@
+{
+  "minMuleVersion": "4.9.15",
+  "name": "mule-elastic-stock-http-demo",
+  "requiredProduct": "MULE_EE",
+  "configs": [
+    "app.xml"
+  ],
+  "javaSpecificationVersions": [
+    "17"
+  ],
+  "secureProperties": [
+    "ELASTIC_API_KEY",
+    "elastic.apiKey"
+  ]
+}

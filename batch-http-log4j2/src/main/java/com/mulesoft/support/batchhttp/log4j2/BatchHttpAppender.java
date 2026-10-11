@@ -21,6 +21,7 @@ import com.mulesoft.support.batchhttp.core.BatchingLogShipper;
 import com.mulesoft.support.batchhttp.core.LogRecord;
 import com.mulesoft.support.batchhttp.core.sink.DatadogSink;
 import com.mulesoft.support.batchhttp.core.sink.DynatraceSink;
+import com.mulesoft.support.batchhttp.core.sink.ElasticsearchSink;
 import com.mulesoft.support.batchhttp.core.sink.GenericNdjsonSink;
 import com.mulesoft.support.batchhttp.core.sink.LogSink;
 import com.mulesoft.support.batchhttp.core.sink.NewRelicSink;
@@ -48,7 +49,7 @@ import java.util.concurrent.TimeUnit;
  *
  * <p>Instead of one synchronous HTTP request per event, events are enqueued
  * (non-blocking) and shipped in batches by background threads to Datadog,
- * Splunk HEC, New Relic, or any HTTP intake.
+ * Splunk HEC, New Relic, Dynatrace, Elasticsearch, or any HTTP intake.
  *
  * <p>Example {@code log4j2.xml}:
  * <pre>{@code
@@ -149,8 +150,8 @@ public final class BatchHttpAppender extends AbstractAppender {
             @PluginElement("Filter") Filter filter,
             @PluginAttribute(value = "ignoreExceptions", defaultBoolean = true) boolean ignoreExceptions,
             // --- routing / vendor selection ---
-            @PluginAttribute("vendor") String vendor,           // datadog | splunk | newrelic | dynatrace | generic
-            @PluginAttribute("url") String url,                 // generic / splunk base url; dynatrace environment url
+            @PluginAttribute("vendor") String vendor,           // datadog | splunk | newrelic | dynatrace | elasticsearch | generic
+            @PluginAttribute("url") String url,                 // generic / splunk base url; dynatrace environment url; elasticsearch endpoint
             @PluginAttribute("site") String site,               // datadog intake host
             @PluginAttribute("host") String host,               // newrelic intake endpoint (per region) / splunk host field
             @PluginAttribute("hostname") String hostname,       // newrelic per-log hostname facet (reserved attr)
@@ -313,6 +314,9 @@ public final class BatchHttpAppender extends AbstractAppender {
             case "splunkhec": return "url, token";
             case "newrelic":  return "apiKey";
             case "dynatrace": return "url, token (apiKey is accepted as an alias for token)";
+            case "elasticsearch":
+            case "elastic":
+            case "elk":       return "url, apiKey";
             default:          return "url";
         }
     }
@@ -347,6 +351,13 @@ public final class BatchHttpAppender extends AbstractAppender {
                         .apiToken(token != null ? token : apiKey)
                         .source(source)
                         .build();
+            case "elasticsearch":
+            case "elastic":
+            case "elk":
+                // `url` is the Elasticsearch endpoint and `index` the target data stream (default
+                // logs-mule-default); `service`/`host` become the ECS service.name/host.name fields.
+                return ElasticsearchSink.builder()
+                        .url(url).apiKey(apiKey).index(index).service(service).host(host).build();
             case "generic":
             default:
                 GenericNdjsonSink.Builder gb = GenericNdjsonSink.builder().url(url);

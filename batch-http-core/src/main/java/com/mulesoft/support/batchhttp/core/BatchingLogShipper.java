@@ -458,6 +458,8 @@ public final class BatchingLogShipper implements AutoCloseable {
         if (outcome.outcome == SendOutcome.SUCCESS) {
             return;
         }
+        // Only what the intake did not store: a per-record sink may have taken part of the batch.
+        List<LogRecord> unsent = outcome.unsent;
         failedBatches.incrementAndGet();
         // Last-resort safety net: spill to disk so the background replayer can
         // re-ship once the endpoint recovers. We do NOT spill FATAL (4xx) batches —
@@ -466,30 +468,30 @@ public final class BatchingLogShipper implements AutoCloseable {
             // The spill can itself refuse the batch (buffer at its cap, disk below the free-space
             // floor, write error). Ignoring the answer silently loses those records and breaks the
             // accepted == sentRecords + dropped + spillDropped invariant, so count and report it.
-            if (spillStore.spill(toSend)) {
+            if (spillStore.spill(unsent)) {
                 diag.log(Diagnostics.Level.WARN,
                         "batch-http[" + sink.name() + "] send failed after " + config.maxRetries
-                                + " retries (" + outcome.detail + ") — spilled " + toSend.size()
+                                + " retries (" + outcome.detail + ") — spilled " + unsent.size()
                                 + " record(s) to disk for retry");
             } else {
-                dropped.addAndGet(toSend.size());
+                dropped.addAndGet(unsent.size());
                 diag.log(Diagnostics.Level.ERROR,
-                        "batch-http[" + sink.name() + "] dropped " + toSend.size()
+                        "batch-http[" + sink.name() + "] dropped " + unsent.size()
                                 + " record(s) — send failed after " + config.maxRetries + " retries ("
                                 + outcome.detail + ") and the spill buffer refused them");
             }
         } else {
-            dropped.addAndGet(toSend.size());
+            dropped.addAndGet(unsent.size());
             if (outcome.outcome == SendOutcome.FATAL) {
                 // 4xx: misconfiguration (bad API key, wrong endpoint, oversized) — won't fix itself.
                 diag.log(Diagnostics.Level.ERROR,
-                        "batch-http[" + sink.name() + "] dropped " + toSend.size()
+                        "batch-http[" + sink.name() + "] dropped " + unsent.size()
                                 + " record(s) — endpoint rejected the batch (" + outcome.detail
                                 + "); check credentials/endpoint, retrying will not help");
             } else {
                 // Retryable but exhausted with no spill buffer to catch it — genuine data loss.
                 diag.log(Diagnostics.Level.ERROR,
-                        "batch-http[" + sink.name() + "] dropped " + toSend.size()
+                        "batch-http[" + sink.name() + "] dropped " + unsent.size()
                                 + " record(s) — send failed after " + config.maxRetries + " retries ("
                                 + outcome.detail + ") and spill is disabled");
             }
@@ -499,13 +501,20 @@ public final class BatchingLogShipper implements AutoCloseable {
     /** Outcome of attempting to send a batch through the transport with retries. */
     private enum SendOutcome { SUCCESS, RETRYABLE_EXHAUSTED, FATAL }
 
-    /** Send outcome plus the diagnostic detail (last HTTP status / error) for logging. */
+    /**
+     * Send outcome plus the diagnostic detail (last HTTP status / error) for logging, and the
+     * records still unaccounted for. {@code unsent} is the whole batch unless the intake took part
+     * of it (a per-record sink), in which case it is only the remainder — so the caller spills or
+     * drops exactly what was not delivered, never a record the intake already stored.
+     */
     private static final class SendResult {
         final SendOutcome outcome;
         final String detail;
-        SendResult(SendOutcome outcome, String detail) {
+        final List<LogRecord> unsent;
+        SendResult(SendOutcome outcome, String detail, List<LogRecord> unsent) {
             this.outcome = outcome;
             this.detail = detail;
+            this.unsent = unsent;
         }
     }
 
@@ -515,26 +524,35 @@ public final class BatchingLogShipper implements AutoCloseable {
      */
     private SendResult send(List<LogRecord> toSend) {
         // Serialize and (if enabled) gzip the body exactly once; the retry loop reuses it so a
-        // batch retried against a failing endpoint is not re-compressed on every attempt.
-        HttpTransport.Payload payload = transport.prepare(sink.serialize(toSend));
+        // batch retried against a failing endpoint is not re-compressed on every attempt. The one
+        // exception is a partial acceptance, which re-serializes just the records still owed.
+        List<LogRecord> pending = toSend;
+        HttpTransport.Payload payload = transport.prepare(sink.serialize(pending));
         long backoff = config.initialRetryBackoff.toMillis();
         String lastDetail = "no attempt";
         for (int attempt = 0; attempt <= config.maxRetries; attempt++) {
             HttpTransport.Outcome result = transport.send(sink, payload);
             lastDetail = result.detail;
             if (result.result == HttpTransport.Result.SUCCESS) {
-                sentBatches.incrementAndGet();
-                sentRecords.addAndGet(toSend.size());
-                return new SendResult(SendOutcome.SUCCESS, result.detail);
-            }
-            if (result.result == HttpTransport.Result.FATAL) {
-                return new SendResult(SendOutcome.FATAL, result.detail); // retrying a 4xx won't help
+                List<LogRecord> retry = settleAccepted(pending, result.body);
+                if (retry.isEmpty()) {
+                    sentBatches.incrementAndGet(); // once per batch, not per partial acceptance
+                    return new SendResult(SendOutcome.SUCCESS, result.detail, retry);
+                }
+                // The intake stored the rest and asked for these again (throttled or briefly
+                // unavailable): back off like any retryable failure and re-send only them.
+                pending = retry;
+                payload = transport.prepare(sink.serialize(pending));
+                lastDetail = "HTTP " + result.statusCode + " with " + retry.size()
+                        + " record(s) refused transiently";
+            } else if (result.result == HttpTransport.Result.FATAL) {
+                return new SendResult(SendOutcome.FATAL, result.detail, pending); // retrying a 4xx won't help
             }
             if (attempt < config.maxRetries) {
                 if (diag.isEnabled(Diagnostics.Level.DEBUG)) {
                     diag.log(Diagnostics.Level.DEBUG,
                             "batch-http[" + sink.name() + "] send attempt " + (attempt + 1) + "/"
-                                    + (config.maxRetries + 1) + " failed (" + result.detail + "), retrying");
+                                    + (config.maxRetries + 1) + " failed (" + lastDetail + "), retrying");
                 }
                 // A Retry-After from the endpoint beats our own guess — a rate-limited intake
                 // knows when its window reopens, and retrying earlier just earns another 429.
@@ -546,14 +564,48 @@ public final class BatchingLogShipper implements AutoCloseable {
                 backoff = Math.min(backoff * 2, config.maxRetryBackoff.toMillis());
             }
         }
-        return new SendResult(SendOutcome.RETRYABLE_EXHAUSTED, lastDetail);
+        return new SendResult(SendOutcome.RETRYABLE_EXHAUSTED, lastDetail, pending);
+    }
+
+    /**
+     * Book an accepted request and return the records the intake asked to have re-sent. For a
+     * sink that answers per record, the response says which records it stored, which it refused
+     * for good (counted as dropped here, with the reason), and which it refused transiently.
+     * Every other sink's 2xx means the whole batch was stored.
+     */
+    private List<LogRecord> settleAccepted(List<LogRecord> sent, byte[] body) {
+        LogSink.RecordResults r = sink.reportsPerRecordResults() && body != null
+                ? sink.inspectResponse(body, sent.size())
+                : LogSink.RecordResults.ALL_ACCEPTED;
+        if (r.allAccepted()) {
+            sentRecords.addAndGet(sent.size());
+            return java.util.Collections.emptyList();
+        }
+        List<LogRecord> retry = new ArrayList<>(r.retryable.length);
+        for (int i : r.retryable) {
+            if (i >= 0 && i < sent.size()) retry.add(sent.get(i));
+        }
+        int rejected = Math.min(r.rejected, sent.size() - retry.size());
+        sentRecords.addAndGet(sent.size() - retry.size() - rejected);
+        if (rejected > 0) {
+            dropped.addAndGet(rejected);
+            diag.log(Diagnostics.Level.ERROR,
+                    "batch-http[" + sink.name() + "] dropped " + rejected + " of " + sent.size()
+                            + " record(s) — the intake accepted the request but refused them ("
+                            + r.rejectedDetail + "); retrying will not help");
+        }
+        return retry;
     }
 
     /**
      * Ship a sub-batch read back from a spill segment. Returns true only when the
      * segment record may be deleted: on SUCCESS, and also on FATAL (a malformed body
      * will never succeed, so we drop it rather than loop forever on a poison segment).
-     * RETRYABLE-exhausted returns false so the segment stays on disk for the next pass.
+     * RETRYABLE-exhausted returns false so the segment stays on disk for the next pass — even
+     * when the intake stored part of the sub-batch. Re-spilling just the remainder would put
+     * those records on disk twice (the kept segment still holds them), so a later failure in
+     * the same segment would replay them twice; the stored part is instead re-sent with the
+     * rest of the segment, the same at-least-once re-send as any mid-segment failure.
      */
     private boolean shipForReplay(List<LogRecord> subBatch) {
         if (subBatch.isEmpty()) return true;
@@ -564,9 +616,9 @@ public final class BatchingLogShipper implements AutoCloseable {
             // or the records vanish from the books entirely (they were never sent and never
             // dropped) and accepted == sentRecords + dropped + spillDropped stops holding.
             failedBatches.incrementAndGet();
-            dropped.addAndGet(subBatch.size());
+            dropped.addAndGet(result.unsent.size());
             diag.log(Diagnostics.Level.ERROR,
-                    "batch-http[" + sink.name() + "] dropped " + subBatch.size()
+                    "batch-http[" + sink.name() + "] dropped " + result.unsent.size()
                             + " replayed record(s) — endpoint rejected the batch (" + result.detail
                             + "); check credentials/endpoint, retrying will not help");
         }

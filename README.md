@@ -5,7 +5,7 @@ stock `HttpAppender`, which sends one synchronous HTTP request per log event.
 
 Instead, events are enqueued (non-blocking) and shipped in **compressed batches**
 by background threads to **Datadog**, **Splunk HEC**, **New Relic**, **Dynatrace**,
-or any HTTP log intake.
+**Elasticsearch** (ELK / Elastic Cloud), or any HTTP log intake.
 
 ## Why
 
@@ -152,7 +152,7 @@ flowchart TD
         Shipper --> Queue["Bounded in-memory queue<br/>non-blocking offer"]
         Queue --> Flush{"Flush trigger?<br/>max records &bull; max bytes &bull; linger time"}
         Flush -->|not yet| Queue
-        Flush -->|batch ready| Sink["LogSink<br/>Datadog / Splunk / New Relic / Dynatrace / Generic"]
+        Flush -->|batch ready| Sink["LogSink<br/>Datadog / Splunk / New Relic / Dynatrace / Elasticsearch / Generic"]
         Sink --> Transport["HttpTransport<br/>JDK HttpClient &bull; gzip &bull; retry + backoff"]
 
         Queue -.->|queue full &amp; spillOnOverflow| Spill[("SpillStore<br/>disk segment files")]
@@ -203,7 +203,7 @@ flowchart TD
 **Prerequisites:** JDK 17+ and Maven 3.8+ (`java -version`, `mvn -version`).
 
 The project is a Maven multi-module reactor (`groupId` `com.mulesoft.support.batchhttp`, version
-`0.1.4`). To build everything and install the artifacts into your local
+`0.1.5`). To build everything and install the artifacts into your local
 Maven repository (`~/.m2/repository`) so other projects can depend on them:
 
 ```bash
@@ -231,7 +231,7 @@ After install, the artifacts are available to other builds as:
 <dependency>
     <groupId>com.mulesoft.support.batchhttp</groupId>
     <artifactId>batch-http-log4j2</artifactId>
-    <version>0.1.4</version>
+    <version>0.1.5</version>
 </dependency>
 ```
 
@@ -335,13 +335,24 @@ the New Relic flows lead each event with an extra `message` summary key, because
 Logs UI parses a JSON `message` and shows nothing without one. Within a pair the flow *is*
 identical, which is what the A/B needs. `datadog-batch-http` (port
 8083) uses `<BatchHttp vendor="datadog">`; its stock-`<Http>` control sibling
-`datadog-stock-http` (port 8084) sends one POST per event. All four Mule demos
-use distinct ports (8081–8084) so they can run at once. See each module's README for
+`datadog-stock-http` (port 8084) sends one POST per event. Every Mule demo
+uses a distinct port (8081–8086) so they can all run at once. See each module's README for
 build, key injection (`DD_API_KEY` / `-Ddatadog.apiKey`), and the A/B measurement guide.
+
+#### Elasticsearch flavor of the same pair
+
+`demo/mule/elastic-batch-http` (port 8085) and `demo/mule/elastic-stock-http` (port 8086) are
+the **Elasticsearch counterparts** of the Datadog pair: the same flow and workload, shipping to an
+Elasticsearch data stream (`logs-mule-default` by default). The batch app uses
+`<BatchHttp vendor="elasticsearch">`, which posts to the Bulk API. Its stock-`<Http>` sibling
+posts one document per event to `/<data-stream>/_doc`, and its layout spells out the same
+ECS document, so the stored documents differ only in `service.name`. Both read the endpoint
+from the `elastic.url` property and the API key from the secure `elastic.apiKey` property. See each module's README for the
+API key privileges and the optional ingest pipeline that parses the JSON inside `message`.
 
 #### Splitting CloudHub 1.0 from CloudHub 2.0
 
-All four demos emit a **`platform`** attribute on every event, so a pair deployed to both
+Every demo emits a **`platform`** attribute on every event, so a pair deployed to both
 CloudHub generations stays separable in the log backend. The two facets have one job each and
 should not be swapped: **`service` identifies the app** (batch versus stock) and **`platform`
 identifies the plane** (CloudHub 1.0 versus 2.0). Both are overridable — `service` with
@@ -360,8 +371,8 @@ value on one half only makes the pair look like a comparison of two platforms. T
 convenience, not a library feature: a `<Properties>` entry plus one field in each app's
 `<PatternLayout>`, which is the one mechanism `<BatchHttp>` and the stock `<Http>` appender share.
 
-**The scripted CloudHub 1.0 deploy does not set this facet.** `scripts/deploy-ch1.sh` passes a
-single `--property` — the vendor API key — so an app deployed through it reports
+**The scripted CloudHub 1.0 deploy does not set this facet.** `scripts/deploy-ch1.sh` passes
+only the vendor credential (for the Elasticsearch pair, also `elastic.url`) as `--property`, so an app deployed through it reports
 `platform: unspecified` until you add `app.platform` by hand in the Runtime Manager **Properties**
 tab (CloudHub 1.0 surfaces those as JVM system properties) and restart. Do that for both halves of
 the pair before a benchmark run, or the CH1 side of the comparison arrives unlabelled.
@@ -507,7 +518,36 @@ omitted when unset:
 </BatchHttp>
 ```
 
-**Generic HTTP intake** — any other endpoint (Elasticsearch-ish, Loki HTTP, an in-house
+**Elasticsearch** (ELK, Elastic Cloud Hosted or Serverless; `0.1.5+`) — `url` is the
+Elasticsearch endpoint and `apiKey` the **encoded** API key, sent as `Authorization: ApiKey
+<apiKey>`. The key needs only `create_doc` and `auto_configure` on the target. `index` names
+the data stream (default `logs-mule-default`, which matches the built-in `logs-*-*` template, so
+it is created on first write). The sink posts to `<url>/<index>/_bulk`. Each record becomes an
+ECS document: `@timestamp`, `message`, `log.level`, `log.logger`, `process.thread.name`,
+`service.name` and `host.name` (both from config, both optional), `error.stack_trace`, and every
+MDC entry as `labels.<key>`. `vendor` also accepts `elastic` and `elk`:
+
+```xml
+<BatchHttp name="elastic" vendor="elasticsearch"
+           url="${env:ELASTIC_URL}"
+           apiKey="${env:ELASTIC_API_KEY}"
+           index="logs-orders-prod"
+           service="orders-api" host="${env:HOSTNAME}"
+           lingerMillis="1000" gzip="true">
+    <PatternLayout pattern="%m"/>
+</BatchHttp>
+```
+
+The Bulk API answers `200` even when it refused some of the documents, and reports a status
+per document. The sink reads those statuses. Only the documents refused with `429` or `5xx` are
+re-sent, on the normal backoff schedule. A document refused with any other `4xx` (a mapping
+conflict, say) would fail the same way again, so it is counted as `dropped` and the appender
+logs an ERROR quoting Elasticsearch's reason. A `409` (version conflict) counts as delivered
+and is not re-sent. The sink lets Elasticsearch generate document IDs, so a re-sent batch (a
+retry after a timeout, or a spill replay) can store duplicate documents: delivery is
+at-least-once, as with the other sinks.
+
+**Generic HTTP intake** — any other endpoint (Loki HTTP, an in-house
 collector). `apiKey`, when set, is sent as `Authorization: Bearer <apiKey>`:
 
 ```xml
@@ -562,7 +602,7 @@ traces) rides along as attributes.
 
 | Attribute | Default | Meaning |
 |-----------|---------|---------|
-| `vendor` | `generic` | `datadog` \| `splunk` \| `newrelic` \| `dynatrace` \| `generic` |
+| `vendor` | `generic` | `datadog` \| `splunk` \| `newrelic` \| `dynatrace` \| `elasticsearch` (aliases `elastic`, `elk`) \| `generic` |
 | `maxBatchRecords` | 200 | flush when batch reaches this many records |
 | `maxBatchBytes` | 1 MiB | flush when the estimated body reaches this size. The estimate counts true **UTF-8 bytes**, so a non-Latin batch (CJK, emoji) is measured the way the intake will measure it rather than undercounted by character count |
 | `lingerMillis` | 1000 | flush a partial batch once its oldest record reaches this age. The window opens when the first record of a batch arrives and is not extended by later ones, so under a steady stream a partial batch still ships every interval rather than waiting for a lull |
@@ -579,7 +619,7 @@ traces) rides along as attributes.
 | `verifyHostName` | true | **insecure when false.** skip TLS hostname verification (Log4j2's attribute name); JVM-global — see the caveat under "TLS" below |
 | `maxMessageBytes` | 32768 (32 KiB) | cap the **retained content** of a single message at this many UTF-8 bytes; longer messages are truncated on a character boundary and a `…[truncated N chars]` marker is appended **on top of** the budget, so the final string runs ~25 bytes over. 0 disables. See "Message size capping" below |
 | `includeStackTrace` | true | render a logged `Throwable` into the record (vendor field varies; see matrix below). Set false to ship message-only |
-| `includeTimestamp` | true | emit the vendor's **reserved event-time** field from the log event's own timestamp — Datadog's `date`, New Relic's `timestamp`. Set false to omit it, which leaves the vendor stamping each record with its own **arrival** time instead, making shipping delay observable (see matrix below). Only the datadog and newrelic sinks read it; splunk, dynatrace and generic always emit their own time field. The default is `true`, so an existing configuration behaves exactly as before |
+| `includeTimestamp` | true | emit the vendor's **reserved event-time** field from the log event's own timestamp — Datadog's `date`, New Relic's `timestamp`. Set false to omit it, which leaves the vendor stamping each record with its own **arrival** time instead, making shipping delay observable (see matrix below). Only the datadog and newrelic sinks read it; splunk, dynatrace, elasticsearch and generic always emit their own time field (Elasticsearch data streams require `@timestamp`). The default is `true`, so an existing configuration behaves exactly as before |
 | `ignoreExceptions` | true | standard Log4j2 flag: when true, an error inside the appender is logged internally and swallowed; set false to let it propagate to the caller |
 | `diagnosticsLevel` | WARN | verbosity of the appender's **own** health log (written to Log4j2's `StatusLogger`, not back through this appender). `WARN` surfaces dropped batches, fatal (4xx) rejections, and queue overflow; `INFO` adds the stats heartbeat; `DEBUG` adds per-retry chatter. See "Troubleshooting & diagnostics" below |
 | `statsIntervalMillis` | 0 (off) | when > 0, emit a one-line stats heartbeat (`accepted`/`sentRecords`/`dropped`/`queueDepth`/spill) this often, so you can confirm delivery is healthy without inspecting the spill directory. Needs `diagnosticsLevel` `INFO` or finer to show |
@@ -635,6 +675,14 @@ traces) rides along as attributes.
 > tables intentionally keep the **`0.1.3`** label because that is the build that was
 > measured; the artifact version is bumped to `0.1.4` for this docs release.
 
+<!-- -->
+
+> **New in v0.1.5 — Elasticsearch:** `vendor="elasticsearch"` (aliases `elastic`, `elk`)
+> ships to the Elasticsearch Bulk API as ECS documents. It retries only the documents
+> Elasticsearch refused transiently and counts permanent refusals as `dropped`
+> (see "Per-vendor examples"). No other sink's behavior changed. Every release is listed in
+> [CHANGELOG.md](CHANGELOG.md).
+
 The engine also respects the hard per-request intake limits each sink declares — a record
 count and an uncompressed body size, drawn from that vendor's documented ceilings — and
 flushes before crossing them. A sink's `limits()` is the authoritative statement of what
@@ -650,27 +698,27 @@ apply to **all** vendors, with `includeTimestamp` the one exception — it is ho
 where the vendor treats the event time as a reserved field it will otherwise stamp itself.
 A `—` means the attribute is ignored for that vendor.
 
-| Attribute | datadog | splunk | newrelic | dynatrace | generic |
-|-----------|---------|--------|----------|-----------|---------|
-| `url` | — | HEC base URL | — | environment URL | endpoint URL |
-| `site` | intake host | — | — | — | — |
-| `host` | reserved facet | `host` field | intake host (per region) | — | — |
-| `hostname` | — | — | reserved facet | — | — |
-| `apiKey` | `DD-API-KEY` | — | `Api-Key` | (token alias) | `Authorization: Bearer` |
-| `token` | — | `Splunk <token>` | — | `Api-Token` | — |
-| `service` | reserved attr | — | attribute | — | — |
-| `source` | `ddsource` | — | — | `log.source` | — |
-| `index` | — | HEC `index` | — | — | — |
-| `sourcetype` | — | HEC `sourcetype` | — | — | — |
-| `includeTimestamp` | gates `date` | — | gates `timestamp` | — | — |
+| Attribute | datadog | splunk | newrelic | dynatrace | elasticsearch | generic |
+|-----------|---------|--------|----------|-----------|---------------|---------|
+| `url` | — | HEC base URL | — | environment URL | Elasticsearch endpoint | endpoint URL |
+| `site` | intake host | — | — | — | — | — |
+| `host` | reserved facet | `host` field | intake host (per region) | — | `host.name` | — |
+| `hostname` | — | — | reserved facet | — | — | — |
+| `apiKey` | `DD-API-KEY` | — | `Api-Key` | (token alias) | `Authorization: ApiKey` | `Authorization: Bearer` |
+| `token` | — | `Splunk <token>` | — | `Api-Token` | — | — |
+| `service` | reserved attr | — | attribute | — | `service.name` | — |
+| `source` | `ddsource` | — | — | `log.source` | — | — |
+| `index` | — | HEC `index` | — | — | data stream | — |
+| `sourcetype` | — | HEC `sourcetype` | — | — | — | — |
+| `includeTimestamp` | gates `date` | — | gates `timestamp` | — | — (always sent) | — |
 
 **Where a rendered stack trace lands** (when `includeStackTrace` is true and the event
-carries a `Throwable`): datadog, newrelic and dynatrace emit it as `error.stack`; splunk
-and generic emit it as `exception`.
+carries a `Throwable`): datadog, newrelic and dynatrace emit it as `error.stack`;
+elasticsearch emits it as ECS `error.stack_trace`; splunk and generic emit it as `exception`.
 
 **Required credential per vendor:** datadog → `apiKey`; splunk → `url` + `token`;
 newrelic → `apiKey`; dynatrace → `url` + `token` (accepts `apiKey` as an alias);
-generic → `url`. A missing required value makes the appender fail to build, and Log4j2's
+elasticsearch → `url` + `apiKey`; generic → `url`. A missing required value makes the appender fail to build, and Log4j2's
 `StatusLogger` reports it at startup naming the appender, the vendor, the specific reason,
 and that vendor's full list of required **`log4j2.xml` attribute names** — followed by
 "this appender is disabled and will ship no logs". Listing the XML names is the load-bearing
@@ -678,7 +726,7 @@ part: the sinks use different internal names than the configuration does (`baseU
 `url`, `apiToken` for `token`), so a raw builder message can cite an attribute that does not
 exist in `log4j2.xml` and that you would never find by grepping your config. The diagnostic
 translates back to the names you actually write, and where a vendor needs two attributes
-(splunk, dynatrace) it lists **both** missing ones rather than stopping at the first. So a
+(splunk, dynatrace, elasticsearch) it lists **both** missing ones rather than stopping at the first. So a
 misconfiguration is visible and diagnosable from the runtime log rather than silently
 dropping logs — provided `status` on `<Configuration>` is not `OFF`, which suppresses this
 report along with every other diagnostic (see "Troubleshooting & diagnostics").
@@ -1023,8 +1071,8 @@ place Log4j2 reports a bad `log4j2.xml`. Set `status="INFO"` to also see the hea
 > dropped-batch warnings, no 4xx rejection, no queue-overflow notice, and no startup
 > credential failure: the appender goes back to failing exactly as silently as it did before
 > the v0.1.3 self-diagnostics were added, and the only symptom is logs not arriving.
-> `status="WARN"` is the minimum that keeps the failure reporting — it is what the two stock
-> Mule demos and the Java example use, while the two batch Mule demos use `status="INFO"` so
+> `status="WARN"` is the minimum that keeps the failure reporting — it is what the stock
+> Mule demos and the Java example use, while the batch Mule demos use `status="INFO"` so
 > their heartbeat surfaces too. If your concern is status-log noise rather than this
 > appender, leave `diagnosticsLevel` at its `WARN` default (which already limits the appender
 > to failures only) or attach your own `StatusListener` to route the messages elsewhere,
@@ -1037,6 +1085,7 @@ place Log4j2 reports a bad `log4j2.xml`. Set `status="INFO"` to also see the hea
 | Situation | Level | What you see |
 |-----------|-------|--------------|
 | Batch rejected with a 4xx (bad API key, wrong endpoint, payload too large) | `ERROR` | `dropped N record(s) — endpoint rejected the batch (HTTP 403); check credentials/endpoint, retrying will not help` |
+| Bulk intake (Elasticsearch) answered `200` but refused some documents for good (mapping conflict, …) | `ERROR` | `dropped N of M record(s) — the intake accepted the request but refused them (document_parsing_exception: …); retrying will not help` |
 | Send failed after all retries, spill **on** | `WARN` | `send failed after 3 retries (HTTP 503) — spilled N record(s) to disk for retry` |
 | Send failed after all retries, spill **off** | `ERROR` | `dropped N record(s) — send failed after 3 retries (…) and spill is disabled` |
 | Queue full (endpoint not keeping up) | `WARN` | coalesced once per 5s: `queue full (capacity=…, policy=DROP_NEWEST): N record(s) dropped, M diverted to spill in the last 5s — the endpoint is not keeping up` |
@@ -1093,8 +1142,9 @@ term on the right is a place a record can legitimately end up, and **every one i
 counted, never silent**:
 
 - `sentRecords` — delivered to the endpoint (live or via spill replay).
-- `dropped` — shed on purpose by the overflow policy when spill is off/full, or a
-  terminal 4xx the engine won't retry.
+- `dropped` — shed on purpose by the overflow policy when spill is off/full, a
+  terminal 4xx the engine won't retry, or a document a bulk intake (Elasticsearch) refused
+  for good inside a `200` response.
 - `spillDropped` — the disk buffer itself evicted/refused a record under the
   total-bytes cap or free-space floor (bounded-buffer back-pressure, by design).
 

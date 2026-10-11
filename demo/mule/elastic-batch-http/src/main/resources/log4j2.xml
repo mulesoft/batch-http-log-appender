@@ -1,0 +1,199 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Mule application Log4j2 configuration.
+
+  IMPORTANT — how the Elasticsearch endpoint and API key are injected:
+    This file is parsed by Log4j2, NOT by Mule's property resolver, so Mule
+    ${...} placeholders do NOT work here. Use a Log4j2 lookup instead:
+
+      ${sys:elastic.apiKey}   -> CloudHub (secure) application property / -Delastic.apiKey=...
+      ${env:ELASTIC_API_KEY}  -> environment variable
+
+    Both values prefer the system property and fall back to the env var:
+      url    ${sys:ELASTIC_URL:-${sys:elastic.url:-${env:ELASTIC_URL:-https://set-elastic-url.invalid}}}
+      apiKey ${sys:ELASTIC_API_KEY:-${sys:elastic.apiKey:-${env:ELASTIC_API_KEY:-MISSING_KEY}}}
+
+    elastic.url is the project's Elasticsearch endpoint as Kibana shows it
+    (https://<project>.es.<region>.<csp>.elastic.cloud:443). The fallback is a
+    reserved .invalid host, so an unconfigured app fails DNS loudly instead of
+    shipping anywhere. elastic.apiKey is the "encoded" value Kibana shows once,
+    when the key is created; it needs create_doc + auto_configure on logs-mule*.
+    In CloudHub set both as application properties, the key as a SECURE one.
+
+  The `packages` attribute makes Log4j2 scan our plugin package so the <BatchHttp>
+  element is recognized inside the Mule app classloader.
+
+  status="INFO": the <BatchHttp> appender reports its OWN health (dropped batches, HTTP
+  status of failures, documents the bulk API refused, queue overflow) and an optional stats
+  heartbeat to Log4j2's StatusLogger — this `status` level is the floor that lets those
+  lines (and the INFO heartbeat) actually print to the runtime console. Drop to "WARN" to
+  keep only failures.
+-->
+<Configuration status="INFO" packages="com.mulesoft.support.batchhttp.log4j2">
+    <Properties>
+        <!-- ECS service.name: this app's identity, and the only field separating it from its A/B
+             sibling (elastic-stock-http) in the shared data stream. Defaults to this app's own
+             name; override per deployment with -Dapp.service=... If you stop wanting an override,
+             DELETE the property — do NOT clear it: Log4j2 substitutes a ${sys:x:-default} default
+             only when the property is ABSENT, so a present-but-empty value resolves to "" and
+             silently blanks the field. -->
+        <Property name="app.service">${sys:app.service:-elastic-batch-http}</Property>
+        <!-- Deployment-platform facet, emitted by the vendor layout below (see there). The same
+             app ships from BOTH CloudHub 1.0 and CloudHub 2.0, and neither service.name nor
+             host.name separates them cleanly. Set it per deployment with
+             -Dapp.platform=cloudhub-1.0 or APP_PLATFORM=cloudhub-2.0; unset it reads
+             `unspecified`. Same delete-don't-clear rule as app.service. Set it on BOTH apps of
+             the pair. -->
+        <Property name="app.platform">${sys:app.platform:-${env:APP_PLATFORM:-unspecified}}</Property>
+        <!-- ECS host.name — the originating instance, from config, NOT from the flow's log
+             message. ${sys:domain} is the CloudHub 1.0 application name; off CH1 it is absent,
+             so the chain falls through to the container hostname — on CH2 the pod. -->
+        <Property name="es.host">${sys:domain:-${env:HOSTNAME:-${hostName}}}</Property>
+        <!-- Elasticsearch endpoint and target data stream. Both chains are DELIBERATELY IDENTICAL
+             in the stock sibling (elastic-stock-http): an A/B pair whose halves shipped to
+             different projects or data streams would not be a comparison. logs-mule-default
+             matches Elasticsearch's built-in logs-*-* index template, so the data stream is
+             created on first write with the logs mappings and lifecycle. -->
+        <Property name="es.url">${sys:ELASTIC_URL:-${sys:elastic.url:-${env:ELASTIC_URL:-https://set-elastic-url.invalid}}}</Property>
+        <Property name="es.dataStream">${sys:elastic.dataStream:-logs-mule-default}</Property>
+    </Properties>
+    <Appenders>
+        <!-- CloudHub 1.0 custom log appender — the FILE appender reproduced EXACTLY as
+             documented at https://docs.mulesoft.com/cloudhub/custom-log-appender so the
+             CloudHub 1.0 log collector (and MuleSoft Support) can pick these files up. The
+             path convention /opt/mule/mule-CURRENT/logs/mule-${sys:domain}.log is mandatory;
+             ${sys:domain} resolves to the CloudHub application name at runtime.
+             The message (%m) is a pretty-printed, multi-line JSON object emitted by the flow —
+             kept human-readable here. The vendor appender single-lines the SAME %m (see below).
+             (Log4j2 auto-appends any stack trace.) -->
+        <RollingFile name="FILE"
+                     fileName="/opt/mule/mule-CURRENT/logs/mule-${sys:domain}.log"
+                     filePattern="/opt/mule/mule-CURRENT/logs/mule-${sys:domain}-%i.log">
+            <PatternLayout pattern="[%d{MM-dd HH:mm:ss.SSS}] %-5p %c{1} [%t]: %m%n"/>
+            <DefaultRolloverStrategy max="10"/>
+            <Policies>
+                <SizeBasedTriggeringPolicy size="10 MB" />
+            </Policies>
+        </RollingFile>
+        <!-- Batching HTTP appender shipping to the Elasticsearch Bulk API. The sink appends the
+             data stream and /_bulk to `url`, so the effective endpoint is
+             ${es.url}/${es.dataStream}/_bulk. Each record becomes a `create` action plus an
+             ECS document: @timestamp, message, log.level, log.logger, process.thread.name,
+             service.name, host.name, error.stack_trace, and every MDC entry as labels.<key>.
+             `_bulk` answers 200 even when it refused some documents; the sink reads the
+             per-document statuses and the engine re-sends only the throttled ones (429/5xx),
+             counting permanent refusals (e.g. a mapping conflict) as dropped with a diagnostic.
+             `vendor` also accepts the aliases "elastic" and "elk". -->
+        <BatchHttp name="elastic"
+                   vendor="elasticsearch"
+                   url="${es.url}"
+                   apiKey="${sys:ELASTIC_API_KEY:-${sys:elastic.apiKey:-${env:ELASTIC_API_KEY:-MISSING_KEY}}}"
+                   index="${es.dataStream}"
+                   service="${app.service}"
+                   host="${es.host}"
+                   maxBatchRecords="200"
+                   maxBatchBytes="900000"
+                   lingerMillis="2000"
+                   queueCapacity="25000"
+                   overflowPolicy="DROP_NEWEST"
+                   gzip="false"
+                   maxRetries="3"
+                   requestTimeoutMillis="10000"
+                   shutdownDrainTimeoutMillis="5000"
+                   flusherThreads="1"
+                   includeStackTrace="true"
+                   diagnosticsLevel="INFO"
+                   statsIntervalMillis="60000"
+                   spillEnabled="false"
+                   spillInstanceId="elastic-batch-http"
+                   spillReplayIntervalMillis="10000"
+                   maxSpillFileBytes="16777216"
+                   maxTotalSpillBytes="536870912"
+                   minFreeDiskBytes="268435456"
+                   spillOnOverflow="true"
+                   spillFormat="BINARY"
+                   spillRecoveryMode="ADOPT"
+                   spillStartupReconcile="true"
+                   spillBacklogOrder="DUAL_STREAM"
+                   spillReplayThreads="2"
+                   spillReplayMaxBytesPerSec="0">
+            <!-- Compression above — a DELIBERATE divergence from the library default:
+                   gzip               the library defaults this to TRUE, which is the right
+                                      production setting; this app overrides it to FALSE on
+                                      purpose. The stock <Http> appender in the A/B sibling
+                                      (elastic-stock-http) has no compression option at all, so
+                                      leaving gzip on would vary two things at once — batching
+                                      AND compression. A real deployment should leave
+                                      compression on (simply omit the attribute). -->
+            <!-- Disk spill above — a DELIBERATE divergence from the library default:
+                   spillEnabled       the library defaults this to TRUE, which is the right
+                                      production setting; this app overrides it to FALSE on
+                                      purpose. The spill buffer's replay threads and disk I/O
+                                      compete for the same fractional vCore that serves
+                                      requests, so leaving spill on would make this A/B measure
+                                      batching PLUS durability machinery. A real deployment
+                                      should leave it on (simply omit the attribute).
+                                      CONSEQUENCE, overflow reverts to dropping: spillOnOverflow
+                                      only takes effect when spill is enabled, so for THIS app
+                                      the overload signal is `dropped` in the stats heartbeat. -->
+            <!-- Queue sizing above:
+                   queueCapacity      25000 (about 50 MB at ~2 KB retained per record) — tens of
+                                      seconds of buffer at the rates this app sustains. With
+                                      spill off it is also the whole buffer. -->
+            <!-- Diagnostics knobs above:
+                   diagnosticsLevel    floor for the appender's OWN health messages, written to
+                                       Log4j2's StatusLogger (out-of-band, never re-shipped).
+                                       INFO = failures plus the periodic stats heartbeat.
+                   statsIntervalMillis a one-line delivery snapshot every 60 s
+                                       (accepted/sent/dropped/failed/queueDepth). -->
+            <!-- Crash-resilience knobs above — every one of them INERT while spillEnabled is
+                 false. Kept so re-enabling durability is a one-word edit; see the Datadog demo's
+                 log4j2.xml for what each one does. -->
+            <!-- Timestamp: Elasticsearch data streams REQUIRE @timestamp, so this sink always
+                 sends the event time and ignores includeTimestamp. The stock sibling's layout
+                 stamps the same field the same way. -->
+            <!-- Vendor layout: prepend the `platform` facet, then collapse the flow's pretty JSON
+                 to ONE line. The leading brace re-opens the object whose own brace %replace
+                 strips (\x7B, hex-escaped so Log4j2's %replace brace-counting does not
+                 miscount). The result is the document's `message` — a single-line JSON string.
+                 Elasticsearch stores it as text; it does not parse JSON inside `message` by
+                 default (see the README for an optional logs@custom ingest pipeline that does,
+                 which then applies to both apps of the pair alike). The stock sibling builds the
+                 byte-identical `message` string, so the two documents match field for field. -->
+            <PatternLayout pattern="{&quot;platform&quot;:&quot;${app.platform}&quot;,%replace{%m}{^\x7B\s*|[\r\n]+\s*}{}"/>
+        </BatchHttp>
+    </Appenders>
+
+    <!-- Logger layout mirrors the CloudHub 1.0 reference at
+         https://docs.mulesoft.com/cloudhub/custom-log-appender : an async root
+         (CloudHub requires async appenders) plus the same framework noise-reduction
+         categories the doc ships. The one demo-specific addition is the application
+         logger below, which ALSO ships to the Elasticsearch appender. -->
+    <Loggers>
+        <!-- Application logs: ship to Elasticsearch AND the local file. -->
+        <AsyncLogger name="com.mulesoft.support.batchhttp.muledemo" level="INFO" additivity="false">
+            <AppenderRef ref="elastic"/>
+            <AppenderRef ref="FILE"/>
+        </AsyncLogger>
+
+        <!-- Framework noise-reduction categories, copied from the CloudHub doc. -->
+        <AsyncLogger name="com.gigaspaces" level="ERROR"/>
+        <AsyncLogger name="com.j_spaces" level="ERROR"/>
+        <AsyncLogger name="com.sun.jini" level="ERROR"/>
+        <AsyncLogger name="net.jini" level="ERROR"/>
+        <AsyncLogger name="org.apache" level="WARN"/>
+        <AsyncLogger name="org.apache.cxf" level="WARN"/>
+        <AsyncLogger name="org.springframework.beans.factory" level="WARN"/>
+        <AsyncLogger name="org.mule" level="INFO"/>
+        <AsyncLogger name="com.mulesoft" level="INFO"/>
+        <AsyncLogger name="org.jetel" level="WARN"/>
+        <AsyncLogger name="Tracking" level="WARN"/>
+
+        <!-- Root carries the FILE appender ONLY: framework logs keep landing in the CloudHub
+             log file but are not shipped. The vendor layout wraps the flow's own JSON message,
+             so a plain-text framework line would render as a malformed `message`. -->
+        <AsyncRoot level="INFO">
+            <AppenderRef ref="FILE"/>
+        </AsyncRoot>
+    </Loggers>
+</Configuration>
