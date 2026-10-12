@@ -28,7 +28,9 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.LockSupport;
 
 /**
  * The batching engine. Application threads call {@link #offer(LogRecord)} which
@@ -50,6 +52,27 @@ public final class BatchingLogShipper implements AutoCloseable {
 
     /** How long a {@code BLOCK}-policy offer waits per attempt before re-checking {@link #running}. */
     private static final long BLOCK_POLL_MILLIS = 100L;
+
+    /** Upper bound close() waits for offer() calls already past their running check (BLOCK ones notice within one poll). */
+    private static final long OFFER_QUIESCE_MILLIS = 2 * BLOCK_POLL_MILLIS;
+
+    /** Floor for the time close() spends writing still-queued records to the spill buffer. */
+    private static final long MIN_SHUTDOWN_SPILL_MILLIS = 1_000L;
+
+    /**
+     * offer() calls between their running check and their enqueue. close() waits (briefly) for
+     * zero before the final drain, so in the common case every accepted record is in the queue
+     * when it is drained. The wait is bounded, so a call that is still stuck (a DROP_OLDEST offer
+     * waiting on the spill lock) is covered by {@link #finalDrainStarted} instead.
+     */
+    private final AtomicInteger offersInFlight = new AtomicInteger();
+
+    /**
+     * Set by close() just before its last drain of the queue. An offer() that enqueues and then
+     * sees it takes its record back out (if the drain has not already taken it) and settles it
+     * itself, so a record can never sit in a queue nobody will read again.
+     */
+    private volatile boolean finalDrainStarted;
 
     private final LogSink sink;
     private final BatchConfig config;
@@ -77,6 +100,16 @@ public final class BatchingLogShipper implements AutoCloseable {
     private final AtomicLong overflowDroppedSinceLog = new AtomicLong();
     private final AtomicLong overflowDivertedSinceLog = new AtomicLong();
     private final AtomicLong lastOverflowLogNanos = new AtomicLong(0L);
+
+    // Spill-loss logging throttle: same idea for records the spill buffer evicts (oldest segment
+    // deleted for the cap/floor) or refuses (nothing left to evict). One WARN per interval at
+    // most, carrying the counts since the previous one; the first loss is reported at once.
+    private static final long SPILL_LOSS_LOG_INTERVAL_NANOS = 5_000_000_000L; // 5s
+    private final AtomicLong spillEvictedSegsSinceLog = new AtomicLong();
+    private final AtomicLong spillEvictedRecsSinceLog = new AtomicLong();
+    private final AtomicLong spillRefusedSinceLog = new AtomicLong();
+    private final AtomicLong lastSpillLossLogNanos =
+            new AtomicLong(System.nanoTime() - SPILL_LOSS_LOG_INTERVAL_NANOS);
 
     private final int effectiveMaxRecords;
     private final int effectiveMaxBytes;
@@ -108,15 +141,22 @@ public final class BatchingLogShipper implements AutoCloseable {
                 String instanceId = (config.spillInstanceId != null && !config.spillInstanceId.isBlank())
                         ? config.spillInstanceId
                         : sink.name();
+                // The loss listener can fire from inside this constructor (startup reconcile,
+                // DELETE recovery), so it must not touch spillStore, which is not assigned yet.
                 store = new SpillStore(dir, config.maxSpillFileBytes, config.maxTotalSpillBytes,
                         config.minFreeDiskBytes, null,
                         SpillCodec.forFormat(config.spillFormat),
-                        config.spillRecoveryMode, config.spillStartupReconcile, instanceId);
+                        config.spillRecoveryMode, config.spillStartupReconcile, instanceId,
+                        this::onSpillLoss);
+                reportRecoveredState(store, instanceId);
+                // The replayer starts before the flushers. If segments were adopted from a previous
+                // run (or a crash), its first pass runs at once on its own thread, not one
+                // spillReplayInterval later.
                 replayer = new SpillReplayer(store, this::shipForReplay,
                         config.spillReplayInterval.toMillis(), effectiveMaxRecords,
                         config.shutdownDrainTimeout.toMillis(), sink.name(),
                         config.spillBacklogOrder, config.spillReplayThreads,
-                        config.spillReplayMaxBytesPerSec);
+                        config.spillReplayMaxBytesPerSec, diag);
                 replayer.start();
             } catch (Exception e) {
                 // A bad spill directory must never stop live shipping; run without spill.
@@ -149,6 +189,80 @@ public final class BatchingLogShipper implements AutoCloseable {
         } else {
             this.statsThread = null;
         }
+    }
+
+    /**
+     * Report at startup what the spill store found on disk: segments adopted from a previous run
+     * (which replay now), and segments left alone because another live instance holds the lock.
+     */
+    private void reportRecoveredState(SpillStore store, String instanceId) {
+        String prefix = "batch-http[" + sink.name() + "] ";
+        if (!store.ownsDirectory() && diag.isEnabled(Diagnostics.Level.WARN)) {
+            diag.log(Diagnostics.Level.WARN, prefix + "spill directory " + store.directory()
+                    + " is locked by another live instance with spillInstanceId=" + instanceId + "; "
+                    + store.ignoredSegments() + " existing segment(s) left untouched (ownership is retried"
+                    + " every spillReplayInterval) — give each running instance a distinct spillInstanceId");
+        }
+        if (store.recoveredSegments() > 0 && diag.isEnabled(Diagnostics.Level.INFO)) {
+            diag.log(Diagnostics.Level.INFO, prefix + "recovered " + store.recoveredSegments()
+                    + " spill segment(s) (" + store.recoveredBytes() + " bytes, "
+                    + store.stats().adoptedRecords + " record(s)) left by a previous run"
+                    + " (spillRecoveryMode=ADOPT) — replaying now");
+        }
+    }
+
+    /**
+     * {@link SpillStore.LossListener}: turn the store's losses into diagnostics. Startup losses
+     * are one-shot and logged at once; runtime evictions/refusals are coalesced (see
+     * {@link #noteSpillLoss}). The counting itself is the store's: this only reports. Called
+     * outside the store's lock, possibly before the constructor has assigned {@code spillStore}.
+     */
+    private void onSpillLoss(SpillStore.LossKind kind, int segments, long records, long bytes) {
+        String prefix = "batch-http[" + sink.name() + "] ";
+        if (kind == SpillStore.LossKind.STARTUP_EVICTED) {
+            if (diag.isEnabled(Diagnostics.Level.WARN)) {
+                diag.log(Diagnostics.Level.WARN, prefix + "startup reconcile evicted " + segments
+                        + " oldest spill segment(s) holding " + records + " record(s) (" + bytes
+                        + " bytes) left by a previous run to satisfy maxTotalSpillBytes="
+                        + config.maxTotalSpillBytes + "/minFreeDiskBytes=" + config.minFreeDiskBytes
+                        + " — those logs are lost");
+            }
+        } else if (kind == SpillStore.LossKind.RECOVERY_DISCARDED) {
+            if (diag.isEnabled(Diagnostics.Level.INFO)) {
+                diag.log(Diagnostics.Level.INFO, prefix + "spillRecoveryMode=DELETE discarded " + segments
+                        + " segment(s) (" + records + " record(s), " + bytes + " bytes) left by a previous run");
+            }
+        } else {
+            if (kind == SpillStore.LossKind.EVICTED) {
+                spillEvictedSegsSinceLog.addAndGet(segments);
+                spillEvictedRecsSinceLog.addAndGet(records);
+            } else {
+                spillRefusedSinceLog.addAndGet(records);
+            }
+            noteSpillLoss(false);
+        }
+    }
+
+    /**
+     * At most once per {@link #SPILL_LOSS_LOG_INTERVAL_NANOS} (or now, when {@code force}), WARN
+     * with the evictions and refusals accumulated since the last line. {@code force} is used by
+     * close() so the final window is never stranded.
+     */
+    private void noteSpillLoss(boolean force) {
+        if (!diag.isEnabled(Diagnostics.Level.WARN)) return;
+        long now = System.nanoTime();
+        long last = lastSpillLossLogNanos.get();
+        if (!force && now - last < SPILL_LOSS_LOG_INTERVAL_NANOS) return;
+        if (!lastSpillLossLogNanos.compareAndSet(last, now)) return; // another thread is logging this window
+        long segs = spillEvictedSegsSinceLog.getAndSet(0);
+        long recs = spillEvictedRecsSinceLog.getAndSet(0);
+        long refused = spillRefusedSinceLog.getAndSet(0);
+        if (segs == 0 && refused == 0) return;
+        diag.log(Diagnostics.Level.WARN,
+                "batch-http[" + sink.name() + "] spill buffer full (maxTotalSpillBytes=" + config.maxTotalSpillBytes
+                        + ", minFreeDiskBytes=" + config.minFreeDiskBytes + "): evicted " + segs
+                        + " oldest segment(s) holding " + recs + " record(s), refused " + refused
+                        + " new record(s) since the last report — those logs are lost");
     }
 
     /**
@@ -193,6 +307,9 @@ public final class BatchingLogShipper implements AutoCloseable {
                     .append(" spilledRecords=").append(sp.spilledRecords)
                     .append(" droppedRecords=").append(sp.droppedRecords)
                     .append(" evictedSegments=").append(sp.evictedSegments)
+                    .append(" evictedRecords=").append(sp.evictedRecords)
+                    .append(" adoptedRecords=").append(sp.adoptedRecords)
+                    .append(" corruptBytesSkipped=").append(sp.corruptBytesSkipped)
                     .append('}');
         }
         return sb.toString();
@@ -225,6 +342,17 @@ public final class BatchingLogShipper implements AutoCloseable {
      * by {@link BatchConfig.OverflowPolicy}. Returns true if accepted.
      */
     public boolean offer(LogRecord record) {
+        // Announce the call before checking `running`, so close() can wait for calls that got
+        // past the check and are about to enqueue (see offersInFlight).
+        offersInFlight.incrementAndGet();
+        try {
+            return offerWhileRunning(record);
+        } finally {
+            offersInFlight.decrementAndGet();
+        }
+    }
+
+    private boolean offerWhileRunning(LogRecord record) {
         if (!running.get()) return false;
         record = truncateMessage(record);
         accepted.incrementAndGet();
@@ -238,6 +366,9 @@ public final class BatchingLogShipper implements AutoCloseable {
         // class -> NoClassDefFoundError. An if/else compiles to plain comparisons
         // with no extra class, so it works regardless of classloader topology.
         BatchConfig.OverflowPolicy policy = config.overflowPolicy;
+        // A spill that refuses a record has already counted it in spillStats().droppedRecords, so
+        // `dropped` is incremented below only when no spill was attempted at all.
+        boolean canSpill = spillStore != null && config.spillOnOverflow;
         if (policy == BatchConfig.OverflowPolicy.BLOCK) {
             try {
                 // Bounded waits rather than an unbounded put(): once close() has stopped the
@@ -245,7 +376,7 @@ public final class BatchingLogShipper implements AutoCloseable {
                 // full queue would wedge the application thread that called log() for good.
                 // Re-checking `running` turns that permanent hang into a counted drop.
                 while (running.get()) {
-                    if (queue.offer(record, BLOCK_POLL_MILLIS, TimeUnit.MILLISECONDS)) return true;
+                    if (queue.offer(record, BLOCK_POLL_MILLIS, TimeUnit.MILLISECONDS)) return settleIfStranded(record);
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -257,26 +388,56 @@ public final class BatchingLogShipper implements AutoCloseable {
         } else if (policy == BatchConfig.OverflowPolicy.DROP_OLDEST) {
             while (!queue.offer(record)) {
                 LogRecord evicted = queue.poll(); // evict oldest, then retry
-                if (evicted != null) {
-                    if (spillOverflow(evicted)) {
+                // A POISON sentinel at the head (close() racing this offer) is not a record:
+                // never spill it (it would be replayed as a log line) or count it.
+                if (evicted != null && evicted != POISON) {
+                    if (canSpill && spillStore.spill(List.of(evicted))) {
                         noteOverflow(false);
                     } else {
-                        dropped.incrementAndGet();
+                        if (!canSpill) dropped.incrementAndGet();
                         noteOverflow(true);
                     }
                 }
             }
-            return true;
+            return settleIfStranded(record);
         } else { // DROP_NEWEST (default)
-            if (queue.offer(record)) return true;
-            if (spillOverflow(record)) { // diverted to disk instead of dropped
+            if (queue.offer(record)) return settleIfStranded(record);
+            if (canSpill && spillStore.spill(List.of(record))) { // diverted to disk instead of dropped
                 noteOverflow(false);
                 return true;
             }
-            dropped.incrementAndGet();
+            if (!canSpill) dropped.incrementAndGet();
             noteOverflow(true);
             return false;
         }
+    }
+
+    /**
+     * Called after {@code record} was enqueued. Normally a no-op returning true. If close() has
+     * already started its last drain, nothing may ever read the queue again: take the record
+     * back and settle it here, the way the drain would have (spill it for the next start, or
+     * count it as dropped). {@code remove} and the drain both hold the queue's lock, so exactly
+     * one of them gets the record. Returns whether the record was kept.
+     */
+    private boolean settleIfStranded(LogRecord record) {
+        if (!finalDrainStarted || !queue.remove(record)) return true; // LogRecord equality is identity
+        if (shutdownSpillReplays()) {
+            // A refusal (the store may already be closed) is counted by the store itself.
+            return spillStore.spill(List.of(record));
+        }
+        dropped.incrementAndGet();
+        diag.log(Diagnostics.Level.ERROR, "batch-http[" + sink.name() + "] dropped 1 record(s) offered while"
+                + " the appender was stopping — accepted after the final shutdown drain");
+        return false;
+    }
+
+    /**
+     * True when records spilled at shutdown will be replayed by the next start: a spill buffer
+     * exists and {@code spillRecoveryMode=ADOPT}. With {@code DELETE} the next start discards
+     * them and with {@code IGNORE} it never reads them, so spilling them would only hide a loss.
+     */
+    private boolean shutdownSpillReplays() {
+        return spillStore != null && config.spillRecoveryMode == BatchConfig.SpillRecoveryMode.ADOPT;
     }
 
     /**
@@ -331,14 +492,6 @@ public final class BatchingLogShipper implements AutoCloseable {
         return b.build();
     }
 
-    /** Divert a queue-overflow record to the spill buffer when enabled. Returns true if it was spilled. */
-    private boolean spillOverflow(LogRecord record) {
-        if (spillStore != null && config.spillOnOverflow) {
-            return spillStore.spill(List.of(record));
-        }
-        return false;
-    }
-
     private void runFlusher() {
         List<LogRecord> batch = new ArrayList<>(Math.min(effectiveMaxRecords, 1024));
         int estimatedBytes = 0;
@@ -391,6 +544,14 @@ public final class BatchingLogShipper implements AutoCloseable {
                     // deadline is re-armed when the next record starts a fresh batch.
                 }
             } catch (InterruptedException e) {
+                // Only close() interrupts a flusher, and only once the drain budget is spent. With a
+                // spill buffer the next start replays (ADOPT), re-assert the flag so send() fails at
+                // once (an interrupted HTTP send and backoff sleep both return immediately) and the
+                // held batch goes straight to disk while the store is still open, instead of running
+                // a full retry schedule past the grace window and being refused by a closed store.
+                // Otherwise keep the real delivery attempt: failing fast there would only lose the
+                // batch (with DELETE/IGNORE recovery, disk is not a way back either).
+                if (shutdownSpillReplays()) Thread.currentThread().interrupt();
                 flush(batch);
                 Thread.currentThread().interrupt();
                 return;
@@ -458,6 +619,16 @@ public final class BatchingLogShipper implements AutoCloseable {
         if (outcome.outcome == SendOutcome.SUCCESS) {
             return;
         }
+        if (outcome.outcome == SendOutcome.ERROR) {
+            // A sink/serializer bug. The batch was already moved out of the caller's list, so the
+            // flusher's own catch would see nothing to count: account here for exactly the records
+            // the intake did not take (an earlier partial acceptance already counted the rest as sent).
+            dropped.addAndGet(outcome.unsent.size());
+            diag.log(Diagnostics.Level.ERROR,
+                    "batch-http[" + sink.name() + "] dropped " + outcome.unsent.size()
+                            + " record(s) — unexpected error while batching: " + outcome.detail, outcome.error);
+            return;
+        }
         // Only what the intake did not store: a per-record sink may have taken part of the batch.
         List<LogRecord> unsent = outcome.unsent;
         failedBatches.incrementAndGet();
@@ -465,20 +636,22 @@ public final class BatchingLogShipper implements AutoCloseable {
         // re-ship once the endpoint recovers. We do NOT spill FATAL (4xx) batches —
         // the body is bad and would only churn the buffer forever.
         if (outcome.outcome == SendOutcome.RETRYABLE_EXHAUSTED && spillStore != null) {
-            // The spill can itself refuse the batch (buffer at its cap, disk below the free-space
-            // floor, write error). Ignoring the answer silently loses those records and breaks the
-            // accepted == sentRecords + dropped + spillDropped invariant, so count and report it.
-            if (spillStore.spill(unsent)) {
+            // The spill can itself refuse some or all of the batch (buffer at its cap, disk below
+            // the free-space floor, write error). The store counts what it refuses in
+            // spillStats().droppedRecords, so it is reported here but not counted again in `dropped`.
+            int written = spillStore.spillRecords(unsent);
+            if (written > 0) {
                 diag.log(Diagnostics.Level.WARN,
                         "batch-http[" + sink.name() + "] send failed after " + config.maxRetries
-                                + " retries (" + outcome.detail + ") — spilled " + unsent.size()
+                                + " retries (" + outcome.detail + ") — spilled " + written
                                 + " record(s) to disk for retry");
-            } else {
-                dropped.addAndGet(unsent.size());
+            }
+            if (written < unsent.size()) {
                 diag.log(Diagnostics.Level.ERROR,
-                        "batch-http[" + sink.name() + "] dropped " + unsent.size()
+                        "batch-http[" + sink.name() + "] dropped " + (unsent.size() - written)
                                 + " record(s) — send failed after " + config.maxRetries + " retries ("
-                                + outcome.detail + ") and the spill buffer refused them");
+                                + outcome.detail + ") and the spill buffer refused them"
+                                + " (counted in spillStats().droppedRecords)");
             }
         } else {
             dropped.addAndGet(unsent.size());
@@ -498,8 +671,11 @@ public final class BatchingLogShipper implements AutoCloseable {
         }
     }
 
-    /** Outcome of attempting to send a batch through the transport with retries. */
-    private enum SendOutcome { SUCCESS, RETRYABLE_EXHAUSTED, FATAL }
+    /**
+     * Outcome of attempting to send a batch through the transport with retries. {@code ERROR} is
+     * an unexpected exception from the sink or the transport (e.g. a serializer bug), never retried.
+     */
+    private enum SendOutcome { SUCCESS, RETRYABLE_EXHAUSTED, FATAL, ERROR }
 
     /**
      * Send outcome plus the diagnostic detail (last HTTP status / error) for logging, and the
@@ -511,60 +687,73 @@ public final class BatchingLogShipper implements AutoCloseable {
         final SendOutcome outcome;
         final String detail;
         final List<LogRecord> unsent;
+        /** The exception behind {@link SendOutcome#ERROR}; null otherwise. */
+        final Throwable error;
         SendResult(SendOutcome outcome, String detail, List<LogRecord> unsent) {
+            this(outcome, detail, unsent, null);
+        }
+        SendResult(SendOutcome outcome, String detail, List<LogRecord> unsent, Throwable error) {
             this.outcome = outcome;
             this.detail = detail;
             this.unsent = unsent;
+            this.error = error;
         }
     }
 
     /**
      * Serialize and send a batch with retry + backoff. Shared by live flushing and
-     * spill replay so both honour identical transport semantics.
+     * spill replay so both honour identical transport semantics. Never throws: an unexpected
+     * exception comes back as {@link SendOutcome#ERROR} carrying only the records still owed,
+     * so a caller never counts as dropped a record an earlier partial acceptance counted as sent.
      */
     private SendResult send(List<LogRecord> toSend) {
         // Serialize and (if enabled) gzip the body exactly once; the retry loop reuses it so a
         // batch retried against a failing endpoint is not re-compressed on every attempt. The one
         // exception is a partial acceptance, which re-serializes just the records still owed.
+        // `pending` always holds the records not yet accounted for, including in the catch below.
         List<LogRecord> pending = toSend;
-        HttpTransport.Payload payload = transport.prepare(sink.serialize(pending));
-        long backoff = config.initialRetryBackoff.toMillis();
-        String lastDetail = "no attempt";
-        for (int attempt = 0; attempt <= config.maxRetries; attempt++) {
-            HttpTransport.Outcome result = transport.send(sink, payload);
-            lastDetail = result.detail;
-            if (result.result == HttpTransport.Result.SUCCESS) {
-                List<LogRecord> retry = settleAccepted(pending, result.body);
-                if (retry.isEmpty()) {
-                    sentBatches.incrementAndGet(); // once per batch, not per partial acceptance
-                    return new SendResult(SendOutcome.SUCCESS, result.detail, retry);
+        try {
+            HttpTransport.Payload payload = transport.prepare(sink.serialize(pending));
+            long backoff = config.initialRetryBackoff.toMillis();
+            String lastDetail = "no attempt";
+            for (int attempt = 0; attempt <= config.maxRetries; attempt++) {
+                HttpTransport.Outcome result = transport.send(sink, payload);
+                lastDetail = result.detail;
+                if (result.result == HttpTransport.Result.SUCCESS) {
+                    List<LogRecord> retry = settleAccepted(pending, result.body);
+                    if (retry.isEmpty()) {
+                        sentBatches.incrementAndGet(); // once per batch, not per partial acceptance
+                        return new SendResult(SendOutcome.SUCCESS, result.detail, retry);
+                    }
+                    // The intake stored the rest and asked for these again (throttled or briefly
+                    // unavailable): back off like any retryable failure and re-send only them.
+                    pending = retry;
+                    payload = transport.prepare(sink.serialize(pending));
+                    lastDetail = "HTTP " + result.statusCode + " with " + retry.size()
+                            + " record(s) refused transiently";
+                } else if (result.result == HttpTransport.Result.FATAL) {
+                    return new SendResult(SendOutcome.FATAL, result.detail, pending); // retrying a 4xx won't help
                 }
-                // The intake stored the rest and asked for these again (throttled or briefly
-                // unavailable): back off like any retryable failure and re-send only them.
-                pending = retry;
-                payload = transport.prepare(sink.serialize(pending));
-                lastDetail = "HTTP " + result.statusCode + " with " + retry.size()
-                        + " record(s) refused transiently";
-            } else if (result.result == HttpTransport.Result.FATAL) {
-                return new SendResult(SendOutcome.FATAL, result.detail, pending); // retrying a 4xx won't help
-            }
-            if (attempt < config.maxRetries) {
-                if (diag.isEnabled(Diagnostics.Level.DEBUG)) {
-                    diag.log(Diagnostics.Level.DEBUG,
-                            "batch-http[" + sink.name() + "] send attempt " + (attempt + 1) + "/"
-                                    + (config.maxRetries + 1) + " failed (" + lastDetail + "), retrying");
+                if (attempt < config.maxRetries) {
+                    if (diag.isEnabled(Diagnostics.Level.DEBUG)) {
+                        diag.log(Diagnostics.Level.DEBUG,
+                                "batch-http[" + sink.name() + "] send attempt " + (attempt + 1) + "/"
+                                        + (config.maxRetries + 1) + " failed (" + lastDetail + "), retrying");
+                    }
+                    // A Retry-After from the endpoint beats our own guess — a rate-limited intake
+                    // knows when its window reopens, and retrying earlier just earns another 429.
+                    // Still clamped by maxRetryBackoff so a hostile/absurd value can't park a flusher.
+                    long wait = result.retryAfterMillis >= 0
+                            ? Math.min(result.retryAfterMillis, config.maxRetryBackoff.toMillis())
+                            : jitter(backoff);
+                    sleep(wait);
+                    backoff = Math.min(backoff * 2, config.maxRetryBackoff.toMillis());
                 }
-                // A Retry-After from the endpoint beats our own guess — a rate-limited intake
-                // knows when its window reopens, and retrying earlier just earns another 429.
-                // Still clamped by maxRetryBackoff so a hostile/absurd value can't park a flusher.
-                long wait = result.retryAfterMillis >= 0
-                        ? Math.min(result.retryAfterMillis, config.maxRetryBackoff.toMillis())
-                        : jitter(backoff);
-                sleep(wait);
-                backoff = Math.min(backoff * 2, config.maxRetryBackoff.toMillis());
             }
+            return new SendResult(SendOutcome.RETRYABLE_EXHAUSTED, lastDetail, pending);
+        } catch (RuntimeException e) {
+            return new SendResult(SendOutcome.ERROR, Diagnostics.describe(e), pending, e);
         }
-        return new SendResult(SendOutcome.RETRYABLE_EXHAUSTED, lastDetail, pending);
     }
 
     /**
@@ -610,6 +799,18 @@ public final class BatchingLogShipper implements AutoCloseable {
     private boolean shipForReplay(List<LogRecord> subBatch) {
         if (subBatch.isEmpty()) return true;
         SendResult result = send(subBatch);
+        if (result.outcome == SendOutcome.ERROR) {
+            // A sink or serializer bug on some replayed record. Keeping the segment would re-send
+            // the sub-batches before this one on every pass, forever; abandon this sub-batch like a
+            // FATAL rejection instead, and count what the intake did not already take.
+            failedBatches.incrementAndGet();
+            dropped.addAndGet(result.unsent.size());
+            diag.log(Diagnostics.Level.ERROR,
+                    "batch-http[" + sink.name() + "] dropped " + result.unsent.size()
+                            + " replayed record(s) — unexpected error while re-shipping: "
+                            + result.detail, result.error);
+            return true;
+        }
         if (result.outcome == SendOutcome.RETRYABLE_EXHAUSTED) return false;
         if (result.outcome == SendOutcome.FATAL) {
             // Abandoning a poison segment is the right call, but it is still a loss: count it,
@@ -656,6 +857,20 @@ public final class BatchingLogShipper implements AutoCloseable {
     @Override
     public void close() {
         if (!running.compareAndSet(true, false)) return;
+        // Joins below must not be cut short by an interrupt the caller arrived with (an
+        // interrupted closing thread would otherwise skip every join and seal the store under
+        // flushers that are still writing). Clear it now, restore it on the way out.
+        boolean callerInterrupted = Thread.interrupted();
+        try {
+            callerInterrupted |= shutDown();
+        } finally {
+            if (callerInterrupted) Thread.currentThread().interrupt();
+        }
+    }
+
+    /** The body of {@link #close()}. Returns true if the closing thread was interrupted while waiting. */
+    private boolean shutDown() {
+        boolean interrupted = false;
         // Wake the heartbeat thread so it observes !running and exits promptly.
         if (statsThread != null) {
             statsThread.interrupt();
@@ -666,51 +881,138 @@ public final class BatchingLogShipper implements AutoCloseable {
         for (int i = 0; i < flushers.size(); i++) {
             queue.offer(POISON);
         }
-        long deadline = System.currentTimeMillis() + config.shutdownDrainTimeout.toMillis();
-        for (Thread t : flushers) {
-            long remaining = deadline - System.currentTimeMillis();
-            if (remaining <= 0) break;
-            try {
-                t.join(remaining);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                break;
-            }
-        }
+        long deadline = System.nanoTime() + config.shutdownDrainTimeout.toNanos();
+        interrupted |= joinAll(deadline);
         // Anything still running has either outlived the drain budget or never received a
         // POISON (the queue was full when we offered it — precisely the overload case in which
-        // shutdown matters). Interrupt it: the flusher's InterruptedException path flushes what
-        // it holds and returns. Without this a flusher parks in queue.take() forever — a daemon
-        // thread, so the JVM still exits, but under Mule it survives the appender that created
-        // it and pins the application classloader across every subsequent redeploy.
+        // shutdown matters). Interrupt it: the flusher's InterruptedException path hands what it
+        // holds to the spill buffer (or, when the next start would not replay a spill, makes one
+        // last send) and returns. Without this a flusher parks in queue.take() forever — a daemon thread, so the JVM still exits,
+        // but under Mule it survives the appender that created it and pins the application
+        // classloader across every subsequent redeploy.
         for (Thread t : flushers) {
             if (t.isAlive()) t.interrupt();
         }
-        for (Thread t : flushers) {
-            try {
-                t.join(FLUSHER_INTERRUPT_GRACE_MILLIS);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                break;
-            }
-        }
-        // Stop the background replayer, then close the store so the active segment is
-        // flushed to disk and recoverable on the next run. The flushers above may have
-        // just spilled a final failed batch, so this ordering preserves it.
+        // One grace budget shared by all flushers, not one per flusher.
+        interrupted |= joinAll(System.nanoTime() + FLUSHER_INTERRUPT_GRACE_MILLIS * 1_000_000L);
+        // Stop the background replayer first, so no replay pass seals or ships the segment the
+        // drain below is about to write. Then account for whatever the flushers left in the
+        // queue, while the store is still open, and only then close the store: that seals (and
+        // fsyncs) the active segment so the next run can adopt it.
         if (spillReplayer != null) {
             spillReplayer.close();
         }
-        if (spillStore != null) {
-            spillStore.close();
+        try {
+            drainRemainderOnShutdown();
+        } finally {
+            if (spillStore != null) {
+                noteSpillLoss(true); // report the final window of evictions/refusals, if any
+                spillStore.close();
+            }
+            // Release the HTTP client's thread pool last: nothing is sending any more, and an
+            // executor left running keeps a live thread (and the app classloader it was born
+            // with) for the lifetime of the JVM.
+            transport.close();
         }
-        // Release the HTTP client's thread pool last: nothing is sending any more, and an
-        // executor left running keeps a live thread (and the app classloader it was born
-        // with) for the lifetime of the JVM.
-        transport.close();
         // A final snapshot on shutdown closes the books for whoever is reading the log.
         if (config.statsInterval != null && config.statsInterval.toMillis() > 0
                 && diag.isEnabled(Diagnostics.Level.INFO)) {
             diag.log(Diagnostics.Level.INFO, statsLine());
+        }
+        return interrupted;
+    }
+
+    /**
+     * Join every flusher against one monotonic deadline. An interrupt of the closing thread is
+     * remembered (and returned) but does not end the wait early; the deadline still bounds it.
+     */
+    private boolean joinAll(long deadlineNanos) {
+        boolean interrupted = false;
+        for (Thread t : flushers) {
+            while (t.isAlive()) {
+                long remainingMs = (deadlineNanos - System.nanoTime()) / 1_000_000L;
+                if (remainingMs <= 0) return interrupted;
+                try {
+                    t.join(remainingMs);
+                } catch (InterruptedException e) {
+                    interrupted = true;
+                }
+            }
+        }
+        return interrupted;
+    }
+
+    /**
+     * Account for records still queued once the flushers have stopped: they missed the drain
+     * budget, or arrived behind the POISON sentinels. Spill them so the next start replays them
+     * (regardless of {@code spillOnOverflow}: they never had a send attempt); with no spill
+     * buffer, or a {@code spillRecoveryMode} that will not replay them, count them as dropped.
+     * Never sends over HTTP, and the spill writing is bounded, so close() stays bounded.
+     */
+    private void drainRemainderOnShutdown() {
+        // Let offer() calls that got past their running check finish enqueueing first.
+        long quiesce = System.nanoTime() + OFFER_QUIESCE_MILLIS * 1_000_000L;
+        while (offersInFlight.get() > 0 && System.nanoTime() < quiesce) {
+            LockSupport.parkNanos(1_000_000L);
+        }
+        // From here on a late offer() settles its own record (see settleIfStranded).
+        finalDrainStarted = true;
+        List<LogRecord> rest = new ArrayList<>(queue.size());
+        queue.drainTo(rest);
+        int n = 0;
+        for (LogRecord r : rest) {
+            if (r != POISON) n++; // sentinels were never accepted records
+        }
+        if (n == 0) return;
+        String prefix = "batch-http[" + sink.name() + "] ";
+        long drainMs = config.shutdownDrainTimeout.toMillis();
+        if (!shutdownSpillReplays()) {
+            dropped.addAndGet(n);
+            diag.log(Diagnostics.Level.ERROR, prefix + "dropped " + n + " record(s) still queued at shutdown"
+                    + " — not sent within shutdownDrainTimeout=" + drainMs + "ms and "
+                    + (spillStore == null ? "spill is disabled"
+                                          : "spillRecoveryMode=" + config.spillRecoveryMode
+                                                  + " would not replay them on the next start"));
+            return;
+        }
+        long budgetEnd = System.nanoTime() + Math.max(drainMs, MIN_SHUTDOWN_SPILL_MILLIS) * 1_000_000L;
+        int spilled = 0, refused = 0, unspilled = 0, i = 0;
+        boolean pastBudget = false;
+        RuntimeException firstError = null;
+        for (LogRecord r : rest) {
+            if (r == POISON) continue;
+            if (!pastBudget && (i++ & 255) == 0 && System.nanoTime() > budgetEnd) pastBudget = true;
+            if (pastBudget) {
+                unspilled++;
+                continue;
+            }
+            try {
+                // One record at a time: a refusal is then exactly one record, already counted by
+                // the store in spillStats().droppedRecords.
+                if (spillStore.spill(List.of(r))) spilled++; else refused++;
+            } catch (RuntimeException e) {
+                unspilled++; // spill() does not throw by contract; never let a surprise abort close()
+                if (firstError == null) firstError = e;
+            }
+        }
+        if (unspilled > 0) dropped.addAndGet(unspilled);
+        if (spilled > 0 && diag.isEnabled(Diagnostics.Level.WARN)) {
+            diag.log(Diagnostics.Level.WARN, prefix + "shutdown: spilled " + spilled + " of " + n
+                    + " record(s) still queued after shutdownDrainTimeout=" + drainMs + "ms to disk"
+                    + " — they will be replayed on the next start");
+        }
+        if (refused > 0) {
+            diag.log(Diagnostics.Level.ERROR, prefix + "dropped " + refused + " record(s) still queued at shutdown"
+                    + " — the spill buffer refused them (counted in spillStats().droppedRecords)");
+        }
+        if (unspilled > 0) {
+            String msg = prefix + "dropped " + unspilled + " record(s) still queued at shutdown"
+                    + " — could not be spilled within the shutdown budget";
+            if (firstError != null) {
+                diag.log(Diagnostics.Level.ERROR, msg + " (" + Diagnostics.describe(firstError) + ")", firstError);
+            } else {
+                diag.log(Diagnostics.Level.ERROR, msg);
+            }
         }
     }
 

@@ -188,6 +188,13 @@ class ShipperLifecycleLeakTest {
                         + "sentinel; a parked flusher survives the appender and pins its classloader");
         assertEquals(List.of(), awaitNoThreads("batch-http-transport-" + marker, 5000),
                 "the transport pool must be released too");
+
+        // ...and the records behind the refused POISON are accounted for, not stranded.
+        BatchingLogShipper.Stats s = shipper.stats();
+        assertEquals(0, s.queueDepth, "queued records and any POISON must be drained at shutdown");
+        assertEquals(51, s.accepted);
+        assertEquals(51, s.dropped, "48 refused by DROP_NEWEST + 1 interrupted in-flight + 2 drained (spill off)");
+        assertEquals(s.accepted, s.sentRecords + s.dropped);
     }
 
     @Test
@@ -280,5 +287,10 @@ class ShipperLifecycleLeakTest {
         assertFalse(producer.isAlive(), "a BLOCK offer must not stay parked once the engine is closed");
         assertFalse(accepted[0], "an offer that could not be enqueued must report failure");
         assertTrue(shipper.stats().dropped > 0, "and must be counted as a drop, not lost silently");
+        BatchingLogShipper.Stats s = shipper.stats();
+        assertEquals(0, s.queueDepth);
+        assertEquals(3, s.accepted);
+        assertEquals(s.accepted, s.sentRecords + s.dropped,
+                "the wedged in-flight record, the drained one and the parked BLOCK offer are all counted");
     }
 }

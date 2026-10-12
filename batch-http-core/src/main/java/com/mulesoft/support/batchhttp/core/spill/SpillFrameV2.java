@@ -79,6 +79,14 @@ final class SpillFrameV2 {
                 && buf[off + 2] == SYNC2 && buf[off + 3] == SYNC3;
     }
 
+    /** Read a big-endian 4-byte int from {@code buf} starting at {@code off}. */
+    static int readIntBE(byte[] buf, int off) {
+        return ((buf[off] & 0xFF) << 24)
+                | ((buf[off + 1] & 0xFF) << 16)
+                | ((buf[off + 2] & 0xFF) << 8)
+                | (buf[off + 3] & 0xFF);
+    }
+
     /** Write {@code value} as a big-endian 4-byte int into {@code buf} starting at {@code off}. */
     static void putIntBE(byte[] buf, int off, int value) {
         buf[off]     = (byte) (value >>> 24);

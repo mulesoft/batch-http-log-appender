@@ -17,21 +17,32 @@
 package com.mulesoft.support.batchhttp.core.spill;
 
 import com.mulesoft.support.batchhttp.core.BatchConfig;
+import com.mulesoft.support.batchhttp.core.Diagnostics;
 import com.mulesoft.support.batchhttp.core.LogRecord;
 
+import java.io.IOException;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Background machinery that drains spilled segments back to the endpoint when it is
  * healthy, and on startup replays any segments adopted from a previous run/crash.
  *
- * <p>A single driver thread fires one pass every {@code replayInterval}. Each pass:
+ * <p>A single driver thread fires one pass every {@code replayInterval}. When segments are
+ * already on disk at construction (adopted from a previous run or a crash), the first pass
+ * runs immediately rather than one interval later: in a crash loop that restarts the runtime
+ * every few seconds, waiting a full interval would mean the inherited backlog never replays
+ * while new spill keeps evicting it. Each pass:
  * <ol>
+ *   <li>Re-tries the directory lock if a live sibling held it at startup
+ *       ({@link SpillStore#tryReacquireOwnership()}).</li>
  *   <li>Seals the active segment so records accumulated during the outage become
  *       shippable (otherwise a never-rolled active segment would never replay).</li>
  *   <li>Builds the oldest-first list of shippable segments into a shared deque.</li>
@@ -41,6 +52,13 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *       sub-batch the whole pass is marked unhealthy and all workers stop claiming
  *       (natural backpressure — drain resumes next interval).</li>
  * </ol>
+ *
+ * <p>Damage never stops the drain. A segment whose records are partly corrupt replays its
+ * intact records and reports the rest ({@link SpillStore.SpillStats#corruptBytesSkipped}, plus a
+ * WARN per segment). A segment that cannot be read at all (an I/O error) is kept for a later
+ * pass and logged once, and the workers move on to the segments behind it. A segment evicted
+ * between listing and claiming is skipped. A worker claims each segment from the store
+ * ({@link SpillStore#beginReplay}) so eviction cannot delete it mid-read.
  *
  * <h2>Backlog order ({@link BatchConfig.SpillBacklogOrder})</h2>
  * <ul>
@@ -57,8 +75,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * means unlimited.
  *
  * <p>A mid-segment failure re-reads the whole segment next pass, so duplicate delivery
- * is possible; parallel/newest-first widen that window and reorder delivery. That is an
- * accepted trade-off for logs and avoids a per-segment cursor/checkpoint file.
+ * is possible; parallel/newest-first widen that window and reorder delivery. The same holds
+ * across a crash: a sub-batch delivered just before the process died, in a segment not yet
+ * deleted, is delivered again by the next run. That is an accepted trade-off for logs
+ * (at-least-once) and avoids a per-segment cursor/checkpoint file.
  */
 public final class SpillReplayer implements java.io.Closeable {
 
@@ -77,6 +97,23 @@ public final class SpillReplayer implements java.io.Closeable {
     private final BatchConfig.SpillBacklogOrder backlogOrder;
     private final int workerCount;
     private final RateLimiter rateLimiter;
+    private final Diagnostics diag;
+    /** Segments were already on disk at construction: run the first pass without waiting an interval. */
+    private final boolean replayImmediately;
+    /** Unreadable segments already reported this run, so a medium that stays broken logs once, not every pass. */
+    private final Set<Path> warnedUnreadable = ConcurrentHashMap.newKeySet();
+
+    /** What happened to one segment in a pass. */
+    private enum SegmentResult {
+        /** Every intact record was shipped (or deliberately abandoned): delete the segment. */
+        SHIPPED,
+        /** A sub-batch could not be delivered: keep the segment and end the pass (endpoint unhealthy). */
+        SHIP_FAILED,
+        /** The file could not be read: keep it for a later pass, carry on with the next segment. */
+        UNREADABLE,
+        /** The file disappeared (evicted or deleted since the pass listed it): nothing to do. */
+        GONE
+    }
 
     private final Thread driver;
     private final AtomicBoolean running = new AtomicBoolean(true);
@@ -93,6 +130,19 @@ public final class SpillReplayer implements java.io.Closeable {
                          int subBatchRecords, long joinTimeoutMillis, String sinkName,
                          BatchConfig.SpillBacklogOrder backlogOrder, int replayThreads,
                          long maxBytesPerSec) {
+        this(store, shipper, replayIntervalMillis, subBatchRecords, joinTimeoutMillis, sinkName,
+                backlogOrder, replayThreads, maxBytesPerSec, Diagnostics.NOOP);
+    }
+
+    /**
+     * @param diag where to report recovery outcomes (segments with corrupt bytes, unreadable
+     *             segments, a directory lock taken over); {@code null} for none
+     */
+    public SpillReplayer(SpillStore store, BatchShipper shipper, long replayIntervalMillis,
+                         int subBatchRecords, long joinTimeoutMillis, String sinkName,
+                         BatchConfig.SpillBacklogOrder backlogOrder, int replayThreads,
+                         long maxBytesPerSec, Diagnostics diag) {
+        this.diag = diag != null ? diag : Diagnostics.NOOP;
         this.store = store;
         this.shipper = shipper;
         this.replayIntervalMillis = Math.max(1, replayIntervalMillis);
@@ -105,6 +155,13 @@ public final class SpillReplayer implements java.io.Closeable {
                 ? 2
                 : Math.max(1, replayThreads);
         this.rateLimiter = new RateLimiter(maxBytesPerSec);
+        boolean backlog;
+        try {
+            backlog = !store.shippableSegments().isEmpty();
+        } catch (IOException e) {
+            backlog = false; // the first regular pass will try again
+        }
+        this.replayImmediately = backlog;
         this.driver = new Thread(this::run, "batch-http-spill-replay-" + sinkName);
         this.driver.setDaemon(true);
     }
@@ -114,13 +171,19 @@ public final class SpillReplayer implements java.io.Closeable {
     }
 
     private void run() {
+        boolean first = true;
         while (running.get()) {
-            try {
-                Thread.sleep(replayIntervalMillis);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                break;
+            // The immediate first pass happens here, on the driver thread, so the constructor
+            // (and the appender start that runs it) never blocks on a backlog.
+            if (!(first && replayImmediately)) {
+                try {
+                    Thread.sleep(replayIntervalMillis);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
             }
+            first = false;
             try {
                 replayOnce();
             } catch (RuntimeException e) {
@@ -131,6 +194,16 @@ public final class SpillReplayer implements java.io.Closeable {
 
     /** One drain pass. Public so shutdown can attempt a final synchronous drain. */
     public void replayOnce() {
+        // A live sibling may have held the directory lock at startup; once it lets go, the
+        // segments it left behind become ours (per spillRecoveryMode) and replay below.
+        if (!store.ownsDirectory()) {
+            int before = store.recoveredSegments();
+            if (store.tryReacquireOwnership() && diag.isEnabled(Diagnostics.Level.INFO)) {
+                diag.log(Diagnostics.Level.INFO, "batch-http[" + sinkName + "] spill directory "
+                        + store.directory() + " is no longer locked by another instance — took it over ("
+                        + (store.recoveredSegments() - before) + " segment(s) adopted for replay)");
+            }
+        }
         // Seal the active segment first: records spilled during the outage live there
         // and would otherwise never become shippable.
         store.sealActiveSegment();
@@ -192,11 +265,27 @@ public final class SpillReplayer implements java.io.Closeable {
         while (running.get() && passHealthy.get()) {
             Path segment = claim(deque, fromBack, passHealthy);
             if (segment == null) return;
-            if (!replaySegment(segment, passHealthy)) {
+            // Evicted since the pass listed it (or otherwise no longer ours to ship): that is
+            // not an endpoint failure, so move on rather than ending the pass.
+            if (!store.beginReplay(segment)) continue;
+            SegmentResult result;
+            try {
+                result = replaySegment(segment, passHealthy);
+            } catch (RuntimeException e) {
+                // A bug while re-shipping must not kill a parallel worker; keep the segment and
+                // stop this pass, exactly like a failed ship, so it is retried next interval.
+                result = SegmentResult.SHIP_FAILED;
+            }
+            if (result == SegmentResult.SHIPPED) {
+                store.deleteSegment(segment); // also releases the claim
+                continue;
+            }
+            store.endReplay(segment);
+            if (result == SegmentResult.SHIP_FAILED) {
                 passHealthy.set(false); // endpoint unhealthy — stop the pass (backpressure)
                 return;
             }
-            store.deleteSegment(segment);
+            // UNREADABLE / GONE: keep going with the segments behind it.
         }
     }
 
@@ -207,8 +296,9 @@ public final class SpillReplayer implements java.io.Closeable {
         }
     }
 
-    /** Read and ship one segment in sub-batches. Returns false on the first failed ship. */
-    private boolean replaySegment(Path segment, AtomicBoolean passHealthy) {
+    /** Read and ship one segment in sub-batches, stopping at the first failed ship. */
+    private SegmentResult replaySegment(Path segment, AtomicBoolean passHealthy) {
+        long delivered = 0;
         try (SpillReader reader = new SpillReader(segment, store.maxSegmentBytes())) {
             List<LogRecord> batch = new ArrayList<>(subBatchRecords);
             long batchBytes = 0;
@@ -217,23 +307,39 @@ public final class SpillReplayer implements java.io.Closeable {
                 batch.add(r);
                 batchBytes += reader.lastPayloadLen();
                 if (batch.size() >= subBatchRecords) {
-                    if (!shipper.ship(batch)) return false;
+                    if (!shipper.ship(batch)) return SegmentResult.SHIP_FAILED;
+                    delivered += batch.size();
                     rateLimiter.charge(batchBytes, running, passHealthy);
                     batch = new ArrayList<>(subBatchRecords);
                     batchBytes = 0;
                 }
             }
             if (!batch.isEmpty()) {
-                if (!shipper.ship(batch)) return false;
+                if (!shipper.ship(batch)) return SegmentResult.SHIP_FAILED;
+                delivered += batch.size();
                 rateLimiter.charge(batchBytes, running, passHealthy);
             }
-            // Whole segment shipped; surface any corrupt bytes the reader skipped to resync
-            // (v2 framing) so interior journal damage that was recovered around is observable.
-            store.addCorruptBytesSkipped(reader.corruptBytesSkipped());
-            return true;
-        } catch (java.io.IOException e) {
-            // Cannot read the segment at all — treat as "not shippable now"; keep it.
-            return false;
+            // Whole segment shipped; surface any corrupt bytes the reader skipped (a torn tail
+            // left by a crash, interior damage recovered around) so the loss is observable.
+            long corrupt = reader.corruptBytesSkipped();
+            store.addCorruptBytesSkipped(corrupt);
+            if (corrupt > 0 && diag.isEnabled(Diagnostics.Level.WARN)) {
+                diag.log(Diagnostics.Level.WARN, "batch-http[" + sinkName + "] replayed spill segment "
+                        + segment.getFileName() + ": " + delivered + " record(s) delivered, " + corrupt
+                        + " corrupt byte(s) skipped (torn tail or damaged record)");
+            }
+            return SegmentResult.SHIPPED;
+        } catch (NoSuchFileException gone) {
+            return SegmentResult.GONE;
+        } catch (IOException e) {
+            // Cannot read the segment at all (a failing block, permissions, not a regular file).
+            // Keep it — the medium may recover — but never let it block the segments behind it.
+            if (warnedUnreadable.add(segment) && diag.isEnabled(Diagnostics.Level.WARN)) {
+                diag.log(Diagnostics.Level.WARN, "batch-http[" + sinkName + "] spill segment "
+                        + segment.getFileName() + " could not be read (" + Diagnostics.describe(e)
+                        + ") — skipped this pass, will retry");
+            }
+            return SegmentResult.UNREADABLE;
         }
     }
 

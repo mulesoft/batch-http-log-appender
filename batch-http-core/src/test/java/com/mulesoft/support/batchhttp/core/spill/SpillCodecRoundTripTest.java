@@ -16,11 +16,16 @@
  */
 package com.mulesoft.support.batchhttp.core.spill;
 
+import com.mulesoft.support.batchhttp.core.BatchConfig;
 import com.mulesoft.support.batchhttp.core.LogRecord;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -134,5 +139,25 @@ class SpillCodecRoundTripTest {
         assertSame(SpillCodec.BINARY, SpillCodec.forId(SpillCodec.ID_BINARY));
         assertSame(SpillCodec.JSON, SpillCodec.forId(SpillCodec.ID_JSON));
         assertNull(SpillCodec.forId((byte) 99));
+    }
+
+    @Test
+    void bothCodecsUseTheCorruptionTolerantFraming(@TempDir Path dir) throws Exception {
+        assertEquals(SpillSegmentHeader.VERSION_V2, SpillCodec.BINARY.framingVersion());
+        assertEquals(SpillSegmentHeader.VERSION_V2, SpillCodec.JSON.framingVersion(),
+                "JSON segments get sync+CRC framing too, so damage mid-segment no longer ends them");
+
+        try (SpillStore store = new SpillStore(dir, 1 << 20, 1 << 24, 0L, d -> Long.MAX_VALUE / 4,
+                SpillCodec.JSON, BatchConfig.SpillRecoveryMode.ADOPT, false)) {
+            store.spill(List.of(LogRecord.builder().timestampMillis(1).level("INFO").loggerName("l")
+                    .threadName("t").message("hello").build()));
+            store.sealActiveSegment();
+            Path seg = store.shippableSegments().get(0);
+            byte[] bytes = Files.readAllBytes(seg);
+            assertEquals(SpillSegmentHeader.VERSION_V2, bytes[4], "header framing byte");
+            assertEquals(SpillCodec.ID_JSON, bytes[5], "header codec byte");
+            assertTrue(new String(bytes, java.nio.charset.StandardCharsets.UTF_8).contains("\"msg\":\"hello\""),
+                    "the payload stays human-readable JSON");
+        }
     }
 }
