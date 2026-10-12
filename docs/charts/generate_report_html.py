@@ -394,6 +394,17 @@ TEMPLATE = '''<!DOCTYPE html>
       <li><b>Throughput and mean latency are one measurement, not two.</b> The load is
       closed-loop (<code>oha</code> with no rate limit), so requests/sec is the arithmetic
       consequence of mean latency, not an independent win. The percentiles are unaffected.</li>
+      <li><b>New Relic results depend on location.</b> The workers run in Sydney
+      (<code>ap-southeast-2</code>), and Datadog's <code>ap2</code> site is in the same region.
+      New Relic offers only US and EU regions; these apps ship to the US endpoint
+      (<code>log-api.newrelic.com</code>), so every request crosses the Pacific, which limits how
+      fast the appender can deliver. Requests/sec measures how responsive the app stays, not how
+      many logs arrive. A later delivery-checked run (2026-10-12, engine 0.1.6) found that with
+      this demo configuration (spill off) New Relic batch delivered only about 10–33% of the logs
+      at sustained load, while Datadog delivered 100%. With spill on, every log arrived, but a
+      5-minute burst took about 12 minutes to drain, and a backlog still on disk is lost if the
+      worker is replaced first. Workers closer to the New Relic region, or <code>gzip</code> plus
+      more <code>flusherThreads</code>, ship faster.</li>
     </ul>
   </div>
 
