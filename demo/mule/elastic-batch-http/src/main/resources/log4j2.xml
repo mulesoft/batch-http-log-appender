@@ -104,7 +104,7 @@
                    includeStackTrace="true"
                    diagnosticsLevel="INFO"
                    statsIntervalMillis="60000"
-                   spillEnabled="false"
+                   spillEnabled="${sys:batch.spillEnabled:-false}"
                    spillInstanceId="elastic-batch-http"
                    spillReplayIntervalMillis="10000"
                    maxSpillFileBytes="16777216"
@@ -133,7 +133,9 @@
                                       requests, so leaving spill on would make this A/B measure
                                       batching PLUS durability machinery. A real deployment
                                       should leave it on (simply omit the attribute).
-                                      CONSEQUENCE, overflow reverts to dropping: spillOnOverflow
+                                      To run THIS app with spill on (the zero-loss variant),
+                                      set the property batch.spillEnabled=true.
+                                      CONSEQUENCE of the default, overflow reverts to dropping: spillOnOverflow
                                       only takes effect when spill is enabled, so for THIS app
                                       the overload signal is `dropped` in the stats heartbeat. -->
             <!-- Queue sizing above:
