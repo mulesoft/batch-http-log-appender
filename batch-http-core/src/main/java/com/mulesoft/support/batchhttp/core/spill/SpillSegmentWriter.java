@@ -18,8 +18,11 @@ package com.mulesoft.support.batchhttp.core.spill;
 
 import java.io.BufferedOutputStream;
 import java.io.Closeable;
+import java.io.FileDescriptor;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
@@ -42,10 +45,27 @@ import java.nio.file.StandardOpenOption;
  * The header makes the file self-describing so a later run can decode it even if its
  * configured codec or framing differs.
  *
- * <p>Each {@link #append} flushes the buffer to the OS so an abrupt process death
- * loses at most the single in-flight frame. We do not {@code fsync} per frame —
- * that would defeat the "near-zero overhead" goal and the spill path is already
- * the abnormal case.
+ * <h2>Durability</h2>
+ * Each {@link #append} flushes the buffer to the OS, so once it returns the frame lives in
+ * the kernel page cache and survives an abrupt death of the <em>process</em> ({@code kill -9},
+ * OOM kill, {@code Runtime.halt}, a crashed worker): the next run reads it back. At most the
+ * single in-flight frame is torn, and the reader skips and counts that. {@link #close()}
+ * additionally {@code fsync}s the file, and the store closes a segment whenever it rolls,
+ * whenever the replayer seals it (once per replay pass) and on shutdown; the store also
+ * {@code fsync}s the directory when it creates a segment, so the file's name is durable too
+ * (best effort: skipped where a directory cannot be synced, e.g. Windows). So a <em>host</em>
+ * crash or power loss should lose at most what was spilled since the last roll/seal, about one
+ * replay interval or one segment; this is best effort and depends on the filesystem honouring
+ * {@code fsync}. A segment deleted just before a power loss can also reappear and be replayed
+ * again (a duplicate, never a loss). We deliberately do not {@code fsync} per frame: that would
+ * defeat the "near-zero overhead" goal, and the spill path is already the abnormal case.
+ *
+ * <p>The file is written through a {@link FileOutputStream} and synced through its
+ * {@link FileDescriptor}, not through a {@code FileChannel}. A {@code FileChannel} is
+ * interruptible: a write or {@code force()} from a thread whose interrupt flag is set closes
+ * the channel with {@code ClosedByInterruptException}. That is exactly the thread that must
+ * still be able to spill, because a flusher interrupted at shutdown hands its batch to the
+ * spill buffer.
  *
  * <p>Not thread-safe: callers serialize access (see {@link SpillStore}).
  */
@@ -55,6 +75,8 @@ final class SpillSegmentWriter implements Closeable {
     private final long seq;
     private final byte framingVersion;
     private final OutputStream out;
+    /** Descriptor to {@code fsync} on close; null for the test-stream seam or a non-default filesystem. */
+    private final FileDescriptor fd;
     private long bytesWritten;
 
     /** Legacy constructor (v1 framing) retained for callers/tests that don't specify a version. */
@@ -77,8 +99,20 @@ final class SpillSegmentWriter implements Closeable {
         this.framingVersion = framingVersion;
         long existing = Files.exists(file) ? Files.size(file) : 0L;
         // Append mode so a re-opened (recovered) segment is never truncated.
-        OutputStream opened = stream != null ? stream : new BufferedOutputStream(Files.newOutputStream(
-                file, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND));
+        OutputStream opened;
+        FileDescriptor descriptor = null;
+        if (stream != null) {
+            opened = stream;
+        } else if (file.getFileSystem() == FileSystems.getDefault()) {
+            FileOutputStream fos = new FileOutputStream(file.toFile(), true);
+            descriptor = fos.getFD();
+            opened = new BufferedOutputStream(fos);
+        } else {
+            // A non-default (e.g. in-memory) filesystem has no descriptor to sync.
+            opened = new BufferedOutputStream(Files.newOutputStream(
+                    file, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND));
+        }
+        this.fd = descriptor;
         this.bytesWritten = existing;
         // Stamp the self-describing header exactly once, when the file is brand new.
         if (existing == 0L) {
@@ -135,8 +169,25 @@ final class SpillSegmentWriter implements Closeable {
         return frame;
     }
 
+    /**
+     * Flush, {@code fsync} and close. Called when a segment rolls, is sealed for replay, or the
+     * store closes, so the host-crash exposure window ends at each of those points. A sync
+     * failure is still reported, but the stream is closed either way.
+     */
     @Override
     public void close() throws IOException {
-        out.close();
+        IOException failure = null;
+        try {
+            out.flush();
+            if (fd != null) fd.sync();
+        } catch (IOException e) {
+            failure = e;
+        }
+        try {
+            out.close();
+        } catch (IOException e) {
+            if (failure == null) failure = e; else failure.addSuppressed(e);
+        }
+        if (failure != null) throw failure;
     }
 }

@@ -10,8 +10,8 @@ Datadog endpoint — with **exactly one variable changed**: instead of the repo'
 `<BatchHttp>` appender, it uses **Log4j2's stock, built-in `<Http>` appender**, which
 sends **one synchronous HTTP POST per log event**. No batching, no queue coalescing, and no
 compression or disk-spill option at all — every event is its own round-trip. The batch sibling
-has both of those options; the demo deliberately turns them off so the pair varies by batching
-alone.
+has both of those options: it turns compression off so the pair does not also differ by
+compression, and keeps disk spill on, the library default.
 
 | | `datadog-batch-http` (batch) | `datadog-stock-http` (this, control) |
 |---|---|---|
@@ -19,7 +19,7 @@ alone.
 | Requests to Datadog | 1 per **batch** (≤200 events) | 1 per **event** |
 | Body | JSON array, uncompressed (demo sets `gzip="false"`; library default is `true`) | one JSON object, uncompressed |
 | Queue / linger | bounded queue, time/size/count flush | none |
-| Durability | retry only (demo sets `spillEnabled="false"`; library default is `true`, which adds the disk-spill safety net) | none (event lost on failure) |
+| Durability | retry, then the disk-spill safety net (on, the library default; `batch.spillEnabled=false` turns it off) | none (event lost on failure) |
 | Custom dependency | `batch-http-log4j2` jar bundled | **none** — stock log4j-core (Mule provides it) |
 | HTTP port | 8083 | **8084** (so both run side-by-side) |
 

@@ -17,6 +17,7 @@
 package com.mulesoft.support.batchhttp.core;
 
 import com.mulesoft.support.batchhttp.core.sink.ElasticsearchSink;
+import com.mulesoft.support.batchhttp.core.sink.LogSink;
 import com.mulesoft.support.batchhttp.core.spill.SpillCodec;
 import com.mulesoft.support.batchhttp.core.spill.SpillStore;
 import com.sun.net.httpserver.HttpServer;
@@ -26,6 +27,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.net.InetSocketAddress;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -248,5 +250,98 @@ class BatchingLogShipperPartialRetryTest {
         assertEquals(1, stored.get("r2"), stored.toString());
         assertEquals(1, stored.get("r3"), stored.toString());
         assertTrue(stored.get("r0") >= 1, "at least once: " + stored);
+    }
+
+    /** {@link #sink()} whose serializer throws whenever the batch contains a record with message {@code poison}. */
+    private LogSink sinkThatThrowsOn(String poison) {
+        ElasticsearchSink delegate = sink();
+        return new LogSink() {
+            @Override public URI endpoint() { return delegate.endpoint(); }
+            @Override public Map<String, String> headers() { return delegate.headers(); }
+            @Override public Limits limits() { return delegate.limits(); }
+            @Override public String name() { return "ThrowingBulk"; }
+            @Override public boolean reportsPerRecordResults() { return delegate.reportsPerRecordResults(); }
+            @Override public RecordResults inspectResponse(byte[] body, int batchSize) {
+                return delegate.inspectResponse(body, batchSize);
+            }
+            @Override public byte[] serialize(List<LogRecord> batch) {
+                for (LogRecord r : batch) {
+                    if (poison.equals(r.message())) throw new IllegalStateException("serializer bug on " + poison);
+                }
+                return delegate.serialize(batch);
+            }
+        };
+    }
+
+    /** Collects ERROR lines so a test can check the loss is reported. */
+    private static final class Errors implements Diagnostics {
+        final List<String> lines = new CopyOnWriteArrayList<>();
+        @Override public boolean isEnabled(Level level) { return true; }
+        @Override public void log(Level level, String message) { if (level == Level.ERROR) lines.add(message); }
+        @Override public void log(Level level, String message, Throwable thrown) { log(level, message); }
+    }
+
+    @Test
+    void aLiveBatchWhoseSerializationThrowsIsCountedAsDropped() {
+        respondWith(CLEAN);
+        Errors errors = new Errors();
+
+        BatchingLogShipper shipper = new BatchingLogShipper(sinkThatThrowsOn("bad"),
+                baseConfig(3).spillEnabled(false).diagnostics(errors).build());
+        shipper.offer(rec("a"));
+        shipper.offer(rec("bad"));
+        shipper.offer(rec("c"));
+        shipper.close();
+
+        BatchingLogShipper.Stats s = shipper.stats();
+        assertEquals(0, requests.size(), "nothing can be sent for a batch that does not serialize");
+        assertEquals(3, s.accepted);
+        assertEquals(0, s.sentRecords);
+        assertEquals(3, s.dropped, "the whole batch is counted, not lost uncounted");
+        assertEquals(s.accepted, s.sentRecords + s.dropped);
+        assertTrue(errors.lines.stream().anyMatch(l -> l.contains("dropped 3 record(s) — unexpected error while batching")
+                && l.contains("serializer bug")), errors.lines.toString());
+    }
+
+    @Test
+    void aSerializerFailureAfterAPartialAcceptanceDropsOnlyTheRemainder() {
+        // Attempt 1 stores "stored", throttles "throttled", refuses "refused". Re-serializing just
+        // the throttled record then throws: only that one record may be counted dropped for it.
+        respondWith(MIXED, CLEAN);
+        Errors errors = new Errors();
+
+        BatchingLogShipper shipper = new BatchingLogShipper(sinkThatThrowsOnRetryOf("throttled"),
+                baseConfig(3).spillEnabled(false).diagnostics(errors).build());
+        shipper.offer(rec("stored"));
+        shipper.offer(rec("throttled"));
+        shipper.offer(rec("refused"));
+        shipper.close();
+
+        BatchingLogShipper.Stats s = shipper.stats();
+        assertEquals(1, requests.size(), "the retry body never got built");
+        assertEquals(1, s.sentRecords, "the stored document");
+        assertEquals(2, s.dropped, "the 400 document plus the throttled one whose retry could not be built");
+        assertEquals(s.accepted, s.sentRecords + s.dropped, "a sent record is never also counted dropped: " + s);
+        assertTrue(errors.lines.stream().anyMatch(l -> l.contains("dropped 1 record(s) — unexpected error while batching")),
+                errors.lines.toString());
+    }
+
+    /** Like {@link #sinkThatThrowsOn} but only for a batch made of {@code msg} alone (the retry subset). */
+    private LogSink sinkThatThrowsOnRetryOf(String msg) {
+        LogSink throwing = sinkThatThrowsOn(msg);
+        ElasticsearchSink delegate = sink();
+        return new LogSink() {
+            @Override public URI endpoint() { return delegate.endpoint(); }
+            @Override public Map<String, String> headers() { return delegate.headers(); }
+            @Override public Limits limits() { return delegate.limits(); }
+            @Override public String name() { return "ThrowingBulkRetry"; }
+            @Override public boolean reportsPerRecordResults() { return delegate.reportsPerRecordResults(); }
+            @Override public RecordResults inspectResponse(byte[] body, int batchSize) {
+                return delegate.inspectResponse(body, batchSize);
+            }
+            @Override public byte[] serialize(List<LogRecord> batch) {
+                return batch.size() == 1 ? throwing.serialize(batch) : delegate.serialize(batch);
+            }
+        };
     }
 }

@@ -287,4 +287,46 @@ class BatchSizeAndConservationTest {
                     "records abandoned on the replay path must be counted as dropped: " + s);
         }
     }
+
+    @Test
+    void conservationHoldsAcrossSpillEvictionAndRecovery(@TempDir Path spillDir) throws Exception {
+        // An outage long enough to overflow a tiny spill buffer, then recovery. Every record must
+        // end up sent, dropped, or counted by the buffer as evicted/refused — exactly once.
+        status.set(503);
+        BatchConfig config = BatchConfig.builder()
+                .maxBatchRecords(10)
+                .lingerTime(Duration.ofMillis(20))
+                .maxRetries(0)
+                .initialRetryBackoff(Duration.ofMillis(1))
+                .spillEnabled(true)
+                .spillDirectory(spillDir)
+                .maxSpillFileBytes(512)
+                .maxTotalSpillBytes(4096)
+                .minFreeDiskBytes(0)
+                .spillReplayInterval(Duration.ofMillis(100))
+                .gzip(false)
+                .build();
+
+        int total = 300;
+        BatchingLogShipper shipper = new BatchingLogShipper(sink(1024 * 1024), config);
+        for (int i = 0; i < total; i++) shipper.offer(rec("outage " + i));
+        long deadline = System.currentTimeMillis() + 10_000;
+        while (System.currentTimeMillis() < deadline) {
+            var sp = shipper.spillStats();
+            if (sp.spilledRecords + sp.droppedRecords - sp.evictedRecords >= total) break;
+            Thread.sleep(25);
+        }
+        status.set(200);
+        deadline = System.currentTimeMillis() + 10_000;
+        while (shipper.spillStats().segmentCount > 0 && System.currentTimeMillis() < deadline) Thread.sleep(25);
+        shipper.close();
+
+        BatchingLogShipper.Stats s = shipper.stats();
+        var sp = shipper.spillStats();
+        assertEquals(0, sp.segmentCount, "the buffer drained once the endpoint recovered");
+        assertTrue(sp.evictedRecords > 0, "precondition: the cap evicted something");
+        assertEquals(total, s.accepted);
+        assertEquals(s.accepted, s.sentRecords + s.dropped + sp.droppedRecords,
+                "accepted == sentRecords + dropped + spillDropped: " + s + " " + sp);
+    }
 }

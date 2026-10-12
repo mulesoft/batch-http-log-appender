@@ -41,6 +41,18 @@ public final class JsonSpillCodec implements SpillCodec {
     @Override
     public byte codecId() { return ID_JSON; }
 
+    /**
+     * JSON segments use the same {@code VERSION_V2} sync-marker + CRC framing as binary ones
+     * (since 0.2.0), so a record damaged in the middle of a JSON segment is skipped and replay
+     * resumes at the next intact record, and a flipped byte inside a string field is rejected
+     * by the checksum instead of being delivered garbled. The payload between the 12-byte frame
+     * headers is still plain UTF-8 JSON, readable by eye. Segments written by 0.1.5 and earlier
+     * carry {@code VERSION_V1} in their header and are still read (the reader dispatches on
+     * the header byte), and a 0.1.5 reader already accepts a v2 JSON segment.
+     */
+    @Override
+    public byte framingVersion() { return SpillSegmentHeader.VERSION_V2; }
+
     @Override
     public byte[] encode(LogRecord r) {
         StringBuilder sb = new StringBuilder(256);

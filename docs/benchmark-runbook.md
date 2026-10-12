@@ -4,18 +4,21 @@ SPDX-License-Identifier: Apache-2.0
 
 # CloudHub benchmark runbook
 
-How to reproduce (or re-run) the **"Measured on CloudHub (real Datadog and New Relic intake)"**
+How to reproduce (or re-run) the **"Measured on CloudHub (real Datadog, New Relic and Elasticsearch intake)"**
 figures in [`../README.md`](../README.md) and the full report in
 [`benchmark-results.md`](benchmark-results.md) / [`index.html`](index.html).
 
 This is the operator-facing **manual single-run** procedure: `oha` against `/log?count=20` — 22
-log events per request — over plain `http`, after a warmup, driven paired-parallel with one
-vendor per side. §7 is the authoritative statement of it; §6 is where you confirm it before
-measuring. **Note on provenance:** the currently published figures (2026-08-04) were produced by
-the automated **4-test** harness (Test 1 = 1 min, Test 2 = in-thread churn, Test 3 = 5 min
-sustained — the headline — and Test 4 = 5 min with a 30 s per-request cap), which restarts and
-warms every app before each test and drives **plane-specific concurrency (CloudHub 1.0 at
-`-c 10`, CloudHub 2.0 at `-c 5`)**. The manual recipe below is the equivalent single-run path;
+log events per request — over plain `http` on CloudHub 1.0 and `https` on CloudHub 2.0, after a
+warmup, driven paired-parallel with one vendor per side. §7 is the authoritative statement of it; §6 is where you confirm it before
+measuring. **Note on provenance:** the currently published figures (2026-10-12, engine 0.2.0,
+twelve apps across Datadog, New Relic and Elasticsearch, spill on) were produced by the automated
+**4-test** harness (Test 1 = 1 min, Test 2 = in-thread churn, Test 3 = 5 min sustained — the
+headline — and Test 4 = 5 min with a 30 s per-request cap), which restarts and warms every app
+before each test, drives **plane-specific concurrency (CloudHub 1.0 at `-c 10`, CloudHub 2.0 at
+`-c 5`)**, and runs the three vendors as parallel lanes with one app per vendor at a time. The
+manual recipe below still describes a two-vendor pairing per phase; add the Elasticsearch app as
+a third, concurrent lane. The manual recipe below is the equivalent single-run path;
 where it and the harness differ, the harness is authoritative — follow the plane-specific `-c`
 and `count=20` here so a manual re-run stays comparable.
 
@@ -26,10 +29,13 @@ code produced a number. Re-run from source, record the commit, and republish.
 
 > **Provenance — which figures this runbook describes.** The figures in
 > [`../README.md`](../README.md), [`benchmark-results.md`](benchmark-results.md) and
-> [`index.html`](index.html) are the run of **2026-08-04**, produced by the automated **4-test**
+> [`index.html`](index.html) are the run of **2026-10-12** (engine 0.2.0, twelve apps, three
+> vendors, spill on, logs delivered counted at each vendor), produced by the automated **4-test**
 > harness (see the note above): the headline is **Test 3**, a 5-minute sustained run at
-> plane-specific concurrency (CloudHub 1.0 `-c 10`, CloudHub 2.0 `-c 5`) against
-> `/log?count=20` (22 log events/request) over plain `http`. Raw `oha` output for all four tests
+> plane-specific concurrency (CloudHub 1.0 `-c 10` over `http`, CloudHub 2.0 `-c 5` over `https`)
+> against `/log?count=20` (22 log events/request). It supersedes the run of **2026-08-04**, whose
+> CloudHub 2.0 Datadog stock app carried a leftover `AsyncLoggerConfig.RingBufferSize=20000` and
+> `log4j2.debug=true`, so its 7.6× is not comparable. Raw `oha` output for all four tests
 > is retained locally (git-ignored, it carries hostnames) under `.claude/bench-results/`, and the
 > charts + Markdown report are regenerated from it, so those figures are *recorded*, not asserted.
 > An **earlier, superseded** set of Datadog-only tables (73.18 / 4.05 req/s on CloudHub 1.0,
@@ -69,15 +75,18 @@ code produced a number. Re-run from source, record the commit, and republish.
 | 5 | **One region, chosen before anything is deployed** | Pick a single region and deploy **both** platforms into it. CloudHub 2.0 space availability is narrower than CloudHub 1.0 region availability, so confirm a CloudHub 2.0 space exists in the region *before* committing to it. Record the choice; it is a parameter of the benchmark, not an incidental. |
 | 6 | **CH2 target space** | CloudHub 2.0 deploys into a space. That space must sit in the region chosen in item 5, and its region must be recorded — see §6 and §8. |
 | 7 | **A load-generator host** | Where `oha` runs. Its network position relative to each deployment is part of the measured path, so keep it constant across every run of the session and record its location alongside the two deployment regions. |
-| 8 | **`oha`** | `brew install oha`. Verified present locally: `oha 1.14.0`. |
+| 8 | **`oha`** | `brew install oha`. The published 2026-10-12 run used `oha 1.16`; 1.14.0 has the latency display glitch described in §7, so check your version before you measure. |
 | 9 | **Connected App** | Needed for `anypoint-cli-v4` under `client_credentials`. Every Runtime Manager scope is **environment-scoped**, so an app that holds the right scopes but was never attached to the target environment authenticates cleanly and then 403s on every Runtime Manager call. Grant, at organization level, **View Organization** (`read:organization`) and **CloudHub Organization Admin** (`admin:cloudhub`); and per environment, **View Environment**, **Create Applications**, **Read Applications**, **Manage Settings**, and **Delete Applications** (the last for cleanup). Verify as §4 describes. |
 
-Also required, not optional: a **New Relic ingest key**. The published protocol drives a Datadog
-app and a New Relic app **at the same instant in every phase** (§7), one vendor per side, so a
-full reproduction needs both vendors' credentials and all four apps. As with `dd.site`, the New
-Relic Log API host (`nr.logHost` / `NEW_RELIC_LOG_HOST`) must be **the same value on both apps of
-the New Relic pair, or unset on both** — a pair whose halves ship to different regions is not a
-comparison.
+Also required, not optional: a **New Relic ingest key** and an **Elasticsearch** endpoint with an
+API key (the published run used Elastic Cloud Serverless in Sydney). The published run drives the
+three vendors as parallel lanes, one app per vendor at a time, so a full reproduction needs all
+three vendors' credentials and all six apps on each plane — twelve in total. The manual recipe
+below (§7) pairs two vendors per phase; add the Elasticsearch app as a third, concurrent lane.
+As with `dd.site`, the New Relic Log API host (`nr.logHost` / `NEW_RELIC_LOG_HOST`) must be
+**the same value on both apps of the New Relic pair, or unset on both**, and the two
+Elasticsearch apps must ship to the same project — a pair whose halves ship to different regions
+is not a comparison.
 
 With only one vendor's key you can still measure that vendor's pair, but the phases then hold a
 single app each and must run **one at a time**, because both halves of a pair share one intake and
@@ -89,8 +98,8 @@ published protocol and its phase timing differs.
 
 ## 2. Build the artifacts
 
-Run from the repo root. Record `git rev-parse HEAD` — that commit, not the `0.1.3` version
-string, is what identifies the build under test.
+Run from the repo root. Record `git rev-parse HEAD` — that commit, not the version string
+(`0.2.0` for the published run), is what identifies the build under test.
 
 ```bash
 git rev-parse HEAD                       # record this in the report
@@ -104,11 +113,12 @@ Expect **131 tests to pass** — 117 in `batch-http-core` and 14 in `batch-http-
 counts rather than only the `BUILD SUCCESS` line, so that tests silently ceasing to run is
 visible rather than mistaken for a clean build.
 
-Then build the four Mule deployables. They are **not** modules of the root reactor, so each is
+Then build the six Mule deployables. They are **not** modules of the root reactor, so each is
 a separate invocation:
 
 ```bash
-for d in datadog-batch-http datadog-stock-http newrelic-batch-http newrelic-stock-http; do
+for d in datadog-batch-http datadog-stock-http newrelic-batch-http newrelic-stock-http \
+         elastic-batch-http elastic-stock-http; do
   (cd "demo/mule/$d" && mvn -B clean package)
 done
 ```
@@ -121,23 +131,26 @@ Artifacts (`mule-application` jars):
 | `datadog-stock-http` | `demo/mule/datadog-stock-http/target/mule-datadog-stock-http-demo-1.0.0-SNAPSHOT-mule-application.jar` |
 | `newrelic-batch-http` | `demo/mule/newrelic-batch-http/target/mule-newrelic-demo-1.0.0-SNAPSHOT-mule-application.jar` |
 | `newrelic-stock-http` | `demo/mule/newrelic-stock-http/target/mule-newrelic-stock-http-demo-1.0.0-SNAPSHOT-mule-application.jar` |
+| `elastic-batch-http` | `demo/mule/elastic-batch-http/target/mule-elastic-demo-1.0.0-SNAPSHOT-mule-application.jar` |
+| `elastic-stock-http` | `demo/mule/elastic-stock-http/target/mule-elastic-stock-http-demo-1.0.0-SNAPSHOT-mule-application.jar` |
 
 Refresh `demo/mule/deployable/` from this build. Those clean-named copies are what §4 and §5
 deploy, so they are also what the checks below verify:
 
 ```bash
 mkdir -p demo/mule/deployable
-for app in datadog-batch-http datadog-stock-http newrelic-batch-http newrelic-stock-http; do
+for app in datadog-batch-http datadog-stock-http newrelic-batch-http newrelic-stock-http \
+           elastic-batch-http elastic-stock-http; do
   cp "$(ls demo/mule/$app/target/*-mule-application.jar)" "demo/mule/deployable/$app.jar"
 done
 ```
 
 **Verify each batch app bundles the appender from *this* build, not a stale one resolved from
-`~/.m2`.** The version number reads `0.1.3` either way, so the check has to be on bytes.
+`~/.m2`.** The version number reads the same either way, so the check has to be on bytes.
 
 > **Jar md5s are not reproducible across builds.** The zip archive embeds per-build
 > timestamps, so the same unchanged source produces a different archive digest every time it
-> is built — `batch-http-core-0.1.3.jar` has hashed several different ways from this one
+> is built — under 0.1.3, `batch-http-core-0.1.3.jar` hashed several different ways from one
 > unchanged source, across the originally-deployed jar and every rebuild since.
 > **Never compare a jar against a digest recorded from a previous build.** Such a comparison
 > mismatches whether the code is stale or freshly rebuilt, so it cannot tell the two apart,
@@ -149,12 +162,12 @@ be byte-identical, which is what proves the deployable carries this build's appe
 an artifact resolved from somewhere else — the failure mode that spoiled the original benchmark.
 
 ```bash
-VER=0.1.3
+VER=0.2.0                    # the root POM's <version>; the batch demos pin the same batchhttp.version
 WORK="$(mktemp -d)"          # outside the repo, so nothing is extracted into the working tree
 
 for m in batch-http-core batch-http-log4j2; do
   built="$(md5 -q "$m/target/$m-$VER.jar")"
-  for app in datadog-batch-http newrelic-batch-http; do
+  for app in datadog-batch-http newrelic-batch-http elastic-batch-http; do
     entry="repository/com/mulesoft/support/batchhttp/$m/$VER/$m-$VER.jar"
     unzip -o -q "demo/mule/deployable/$app.jar" "$entry" -d "$WORK/$app"
     bundled="$(md5 -q "$WORK/$app/$entry")"
@@ -169,7 +182,7 @@ rm -rf "$WORK"
 Every line must read `OK`. The jar in each module's `target/` is the same one `mvn install` put
 in `~/.m2/repository`, so either copy works as the left-hand side.
 
-The two stock apps are the control: they must run on the Mule container's stock Log4j2 and
+The three stock apps are the control: they must run on the Mule container's stock Log4j2 and
 bundle **no** appender of their own.
 
 ```bash
@@ -373,19 +386,18 @@ STOCK_URL="$SCHEME://$(anypoint-cli-v4 runtime-mgr cloudhub-application describe
 echo "$BATCH_URL" "$STOCK_URL"
 ```
 
-Those are the URLs §7 loads, on port 80 — the published protocol is plain `http`. Only if the
+Those are the URLs §7 loads, on port 80 — CloudHub 1.0 is driven over plain `http`. Only if the
 platform reports neither field should you fall back to constructing a hostname by hand. While you
 have the `describe` output open, confirm the platform reports the region you asked for, and write
 it down for §8.
 
-> **Scheme parity — plain `http` on both planes.** The published protocol drives **every** app
-> over plain **`http`**, CloudHub 1.0 and CloudHub 2.0 alike, so the two planes meet the same
-> transport. That is a deliberate correction of the superseded July run, which drove the
-> **CloudHub 1.0** apps over plain **`http`** and the **CloudHub 2.0** apps over **`https`** (a
-> private-space certificate, accepted client-side with `--insecure`). CloudHub 1.0 serves both 80
-> and 443, so the July asymmetry was a choice rather than a constraint, and it meant TLS record
-> processing sat on one side of the ledger only — a real cost on a 0.1 vCore container, with the
-> handshake landing in the `Fastest` figure. Keep `SCHEME=http` for both planes, record the scheme
+> **Scheme — what the published run used.** The published 2026-10-12 run drove **CloudHub 1.0
+> over plain `http`** and **CloudHub 2.0 over `https`** (the harness passes `--insecure`). TLS
+> record processing therefore sits on the CloudHub 2.0 side only — a real cost on a 0.1 vCore
+> container, with the handshake landing in the `Fastest` figure — which is one more reason the
+> published surfaces never compare the two planes. Within a plane, batch and stock meet the same
+> transport, which is the comparison the report makes. If you drive either plane over a
+> different scheme, it is not the published protocol, so say so. Either way, record the scheme
 > alongside the region in §8, and do not compare any figure measured over `https` against one
 > measured over `http`.
 
@@ -478,8 +490,8 @@ a speculative one, and each is something the published protocol deliberately fix
       on its own — never CloudHub 1.0 against CloudHub 2.0.** Record the values you used (§8). (The
       next benchmark round plans to even concurrency across planes; until then, keep the values
       above so a re-run matches the published figures.)
-- [ ] ⚠ **Same URL scheme on both planes** — plain **`http`** everywhere. The July run drove
-      CloudHub 1.0 over plain `http` and CloudHub 2.0 over `https`; see the scheme note in §4.
+- [ ] ⚠ **Same URL scheme as the published run** — plain **`http`** on CloudHub 1.0, **`https`**
+      on CloudHub 2.0 — and the same scheme for both apps of a plane; see the scheme note in §4.
 - [ ] **Region parity.** The CloudHub 1.0 worker region as the platform reports it and the
       CloudHub 2.0 space's region are the same region, both matching the choice made in §1.
       Confirm this from Runtime Manager rather than from what you intended to deploy. This is
@@ -516,10 +528,13 @@ a speculative one, and each is something the published protocol deliberately fix
       and treat that pair's absolute req/s as unusable in isolation. Loading one intake with a
       single app per phase is what keeps this from being self-inflicted.
 - [ ] **Restart each app between runs** so the in-memory queue and the connection pool start
-      clean. The batch demos ship with `spillEnabled="false"`, so there is **no spill directory
-      to clear** — that step applies only if you re-enable spill, and then also confirm
-      `${java.io.tmpdir}/batch-http-spill/<sink>/` is empty, because a leftover backlog is
-      replayed on startup (`spillRecoveryMode=ADOPT`) and competes for the same 0.1 vCore.
+      clean. The batch demos ship with spill on (`spillEnabled="${sys:batch.spillEnabled:-true}"`),
+      so also confirm `${java.io.tmpdir}/batch-http-spill/<sink>/` is empty, because a leftover
+      backlog is replayed on startup (`spillRecoveryMode=ADOPT`) and competes for the same
+      0.1 vCore. On CloudHub a restart lands on a new worker (1.0) or pod (2.0) with an empty
+      `/tmp`, so the directory starts clean, and any backlog still on disk is lost. Set
+      `batch.spillEnabled=false` to measure batching alone; then there is no spill directory
+      to clear.
 - [ ] **Nothing else deployed in the same environment** generating load or log volume.
 
 ---
@@ -533,6 +548,10 @@ never a hostname you assembled yourself. This is the manual single-run equivalen
 ```text
 5× curl warmup  →  pause 10 s  →  oha -z 5m load test  →  settle 10 s  →  next phase
 ```
+
+The harness behind the published figures warms lighter: 5 requests at `/log?count=1`, then a
+30 s drain, so the warmup does not pre-load the stock flusher's backlog. The `count=20` warmup
+below is the manual variant; record which one you used.
 
 ```bash
 # One app's side of a phase. The paired app of the other vendor runs this same block
@@ -583,10 +602,10 @@ Notes on the flags:
 - **`--no-tui -z 5m -w -c <plane-conc> <url>`** is the whole command line (Test 3). `-z 5m` and
   `-z 300s` are equivalent; the harness also runs a 1-minute Test 1 (`-z 1m`) and a 30 s-cap Test 4
   (`-z 5m -t 30s`).
-- **No `--insecure`, and no `curl -k`.** Both planes are driven over plain `http` (§4), so there
-  is no certificate to accept. The superseded July run needed `--insecure` because it drove
-  CloudHub 2.0 over `https` against a private-space certificate; pass it again only if you
-  deliberately deviate from the protocol back to `https`, and then say so in the report, because
+- **`--insecure` / `curl -k` only matter on CloudHub 2.0.** The published run drove CloudHub 2.0
+  over `https` and the harness passes `--insecure` (a no-op over CloudHub 1.0's plain `http`). If
+  you drive CloudHub 2.0 over plain `http` instead, there is no certificate to accept; say so in
+  the report, because
   the resulting figures are not comparable with the published ones.
 - The run uses **oha's defaults** for everything else, and they are worth pinning deliberately
   rather than inheriting: HTTP/1.1, keep-alive **on**, **no** per-request timeout (`-t` unset), no
@@ -635,7 +654,9 @@ and the printed latencies come out at **one tenth** of the truth. **Throughput
 × 10.** A re-run that hits the glitch and does not catch it publishes latencies that are wrong
 by an order of magnitude while every other field looks perfectly normal, so this check is not
 optional. It is not hypothetical either: the defect is still live in `oha` 1.14.0, and it hit
-three of the eight runs behind the published figures, each of which carries the ×10 correction.
+three of the eight runs behind the superseded 2026-08-04 figures, each of which carried the ×10
+correction. The published 2026-10-12 run used `oha` 1.16, whose output does not show it; run the
+check anyway, whatever version you have.
 
 Two independent confirmations, both cheap:
 
@@ -708,18 +729,21 @@ Per run, from the platform and the app:
 - **Worker/replica sizing** as the platform reports it, not as you requested it.
 - **The appender configuration under test**, which is `maxBatchRecords=200`,
   `maxBatchBytes=900000`, `lingerMillis=2000`, `queueCapacity=25000` and `flusherThreads=1`,
-  identical in both batch apps, plus the **three deliberate divergences from the library
-  defaults** — `gzip="false"`, `spillEnabled="false"` and `includeTimestamp="false"`. The first
-  two mean the figures measure batching in isolation rather than the appender as it would be
-  deployed, so they belong in the report rather than being left implicit. Note in particular that
+  identical in every batch app, plus the **two deliberate divergences from the library
+  defaults** — `gzip="false"` and `includeTimestamp="false"` — and the spill setting (on by
+  default; record it if you ran with `batch.spillEnabled=false`). These belong in the report
+  rather than being left implicit. Note in particular that
   **compression is off in the demo apps**: every app in the comparison POSTs plaintext, so no
   figure here reflects gzip, and none of the CPU cost on a 0.1 vCore container is compression.
 - **The batch appender's own stats heartbeat** — it logs one line per 60 s with
   `accepted / sent / dropped / failed / queueDepth` plus spill totals
   (`statsIntervalMillis=60000`, `diagnosticsLevel=INFO`). Capture the lines that bracket the
   measured window; they tell you whether anything was dropped, which no oha metric can show.
-  With the demos' `spillEnabled="false"`, `dropped` is the overload signal — the spill totals
-  stay at zero.
+  With the demos' spill on, `spilledRecords` is the overload signal. Records lost because the
+  spill buffer is full show up in `spillStats().droppedRecords` (and in `evictedRecords` when an
+  oldest segment is evicted), not in `dropped`; `dropped` counts terminal rejections (a 4xx,
+  documents a bulk intake refused) and serialization failures. With `batch.spillEnabled=false`,
+  `dropped` is the overload signal as well and the spill totals stay at zero.
 - **Any HTTP 429** in the app log.
 - **CPU and memory** from Runtime Manager for the measured minute. On a 0.1 vCore container a
   pegged CPU is the whole story, and it is the cheapest way to test the throttling hypothesis
@@ -783,8 +807,8 @@ The measurements are **hardcoded** in `docs/charts/generate_benchmark_charts.py`
 
 ## 10. How many runs
 
-**Recommendation: 5 measured runs per configuration — with eight configurations (two vendors ×
-two appenders × two planes), 40 runs total — and report the median with the min–max range.** The
+**Recommendation: 5 measured runs per configuration — with twelve configurations (three vendors ×
+two appenders × two planes), 60 runs total — and report the median with the min–max range.** The
 published figures are one run per configuration, so this remains outstanding.
 
 Reasoning:
@@ -802,10 +826,10 @@ Reasoning:
 Cost per run is modest: 60 s of load plus a restart and a settle. Because each phase drives two
 apps at once, five passes is 20 phases rather than 40 serial runs. Budget ~5 minutes per phase
 including the restarts, so ~100 minutes of wall clock, plus deploy time. The real cost is log
-volume — 5 passes × 8 apps × tens of thousands of events, split across the two vendors. Check both
-plans' ingestion allowances before starting, and consider a short Datadog **exclusion filter** or
-index retention drop on `service:datadog-*-http` (and the New Relic equivalent) after you have the
-screenshots.
+volume — 5 passes × 12 apps × tens of thousands of events, split across the three vendors. Check
+all three plans' ingestion allowances before starting, and consider a short Datadog **exclusion
+filter** or index retention drop on `service:datadog-*-http` (and the New Relic and Elasticsearch
+equivalents) after you have the screenshots.
 
 Also worth doing regardless of n: **alternate the phase order** (batch, stock, stock, batch, …)
 rather than always running the batch phase first, so any drift in intake responsiveness across the
@@ -909,9 +933,10 @@ comparison then quietly violates.
 > per-request penalty is larger than the +605/+711 ms tabulated, not smaller — the direction of
 > the error is at least knowable even where its size is not. Read this whole subsection as
 > "there is a floor on CloudHub 2.0 worth investigating", which it supports, and not as "the
-> floor is 650 ms", which it does not. The 2026-08-04 run under §7 — plain `http`, `count=20` on
-> both planes, `-c 10` on CloudHub 1.0 and `-c 5` on CloudHub 2.0, recorded per run — is what
-> supersedes it, and its figures are the ones to reason from.
+> floor is 650 ms", which it does not. The runs recorded per run since then supersede it: first
+> 2026-08-04 (itself superseded), now the published 2026-10-12 run — `count=20` on both planes,
+> CloudHub 1.0 at `-c 10` over `http` and CloudHub 2.0 at `-c 5` over `https` — whose figures are
+> the ones to reason from.
 
 ### The region difference — falsified, not resolved
 
@@ -947,12 +972,12 @@ cheap they are to check. All are hypotheses; the measurements above are the evid
    against an `https` comparand puts TLS record processing on one side of the ledger only, on a
    container with a tenth of a core to spend. That is worth tens of milliseconds per request,
    not hundreds — a contributor, not the explanation — but it is a *known* asymmetry where the
-   rest of this list is speculative. **Check:** it needs no check; it is settled. **Already
-   fixed:** §7 puts both planes on plain `http` at `count=20` — `-c 10` on CloudHub 1.0 and `-c 5`
-   on CloudHub 2.0 (§6 is where you confirm it before measuring), so this asymmetry is gone from
-   the published run. What it does *not* fix is
-   the CPU-model difference in item 2, which is why the published surfaces still decline to read
-   one plane's table against the other's.
+   rest of this list is speculative. **Check:** it needs no check; it is settled. **Not fixed,
+   and recorded instead:** the published 2026-10-12 run still drives CloudHub 1.0 over `http` and
+   CloudHub 2.0 over `https`, at `count=20` on both, `-c 10` and `-c 5` (§6 is where you confirm
+   it before measuring). The scheme asymmetry stays, alongside the CPU-model difference in
+   item 2, which is why the published surfaces decline to read one plane's table against the
+   other's.
 
 2. **CPU quota semantics differ between a CH1 worker and a CH2 replica.** A CloudHub 1.0 0.1
    vCore worker has historically been able to burst above its nominal share on a shared host;
@@ -971,8 +996,8 @@ cheap they are to check. All are hypotheses; the measurements above are the evid
    where CH1 fronts the worker more directly. Worth tens of milliseconds, not hundreds — a
    contributor, not the explanation, and partly entangled with item 1, since the July run only
    paid for TLS on the CloudHub 2.0 side. **Check:** compare `%{time_connect}` from `curl -w`
-   against each platform over the protocol's plain `http` (add `%{time_appconnect}` only if you
-   deliberately probe over `https`, and then probe both planes that way).
+   against each platform over plain `http` (add `%{time_appconnect}` if you probe over `https`,
+   as the published CloudHub 2.0 runs used, and then probe both planes that way).
 
 4. **The CH1-shaped `FILE` appender misbehaves on CH2.** Both apps write a `RollingFile` to
    `/opt/mule/mule-CURRENT/logs/mule-${sys:domain}.log` — a path the config comments
@@ -1029,9 +1054,9 @@ to explain CH2 on its own.
    load-generator location** in `docs/index.html` and in the `README.md` caveat, so a reader
    can see that both platforms were measured from the same distance.
 7. Record the **exact `oha` command line, the `count=` value, the URL scheme and the phase pairing
-   for each plane**, and state that they were identical across every run. The published run does
-   say that — plain `http` at `count=20` on both planes, `-c 10` on CloudHub 1.0 and `-c 5` on
-   CloudHub 2.0 — so the payload objection that sank the July cross-plane reading no longer
+   for each plane**, and state that they were identical across every run. The published
+   2026-10-12 run does say that — `count=20` on both planes, CloudHub 1.0 at `-c 10` over `http`,
+   CloudHub 2.0 at `-c 5` over `https` — so the payload objection that sank the July cross-plane reading no longer
    applies (the concurrency still differs by plane, by design — §7). **A cross-plane comparability claim still
    may not appear anywhere** — not in `README.md`, not in `docs/index.html`, not in a chart
    subtitle or footnote — because the remaining obstacle is not the parameters but the **CPU
@@ -1039,10 +1064,11 @@ to explain CH2 on its own.
    surface carries that statement, and each table stands as a batch-vs-stock contrast within its
    own vendor and plane; it is only reading one table against another that the record does not
    support. Do not weaken that on the strength of the parameters alone.
-8. Publish each vendor pair as its **own** batch-vs-stock contrast, and do not present the Datadog
-   and New Relic figures as a comparison of the two vendors: they ship to different intakes over
-   different network paths, so the pairing makes the appender comparison fair within a vendor and
-   says nothing about which vendor is faster.
+8. Publish each vendor pair as its **own** batch-vs-stock contrast, and do not present the
+   Datadog, New Relic and Elasticsearch figures as a comparison of the vendors: they ship to
+   different intakes over different network paths (New Relic's crosses the Pacific), so the
+   pairing makes the appender comparison fair within a vendor and says nothing about which vendor
+   is faster.
 
 ### Throughput is not an independent result
 
@@ -1091,12 +1117,12 @@ resolution is the instruction.
 
 | Gap | Impact | Suggested resolution |
 | --- | --- | --- |
-| **The `oha` command line was nowhere in the repo.** Only "oha, 10 connections, 60 s" in the July prose. Flags for keep-alive, HTTP version, per-request timeout, rate limit and `-w` were all unrecorded. | A re-run with different defaults is not comparable. | **Closed.** The published protocol is `oha --no-tui -z 5m -w -c <plane-conc> <url>/log?count=20` over plain `http` (`-c 10` CloudHub 1.0, `-c 5` CloudHub 2.0), oha defaults for everything else, text output; the harness also runs Test 1 (`-z 1m`) and Test 4 (`-z 5m -t 30s`). §7 carries it verbatim, and `README.md` and `docs/index.html` both publish it. |
-| **The warmup was described but not scripted.** "3 requests, 10 s pause" — sequential or concurrent? Same endpoint? Counted? | Minor, but it is the difference between a primed and an unprimed flusher. | **Closed.** 5 `curl --connect-timeout 15 --max-time 60` calls one after another to the same `/log?count=20` endpoint, discarded, then a 10 s pause; a 10 s settle after the measured run. The July run used 3; 5 is what stopped first-run throughput swinging. §7. |
+| **The `oha` command line was nowhere in the repo.** Only "oha, 10 connections, 60 s" in the July prose. Flags for keep-alive, HTTP version, per-request timeout, rate limit and `-w` were all unrecorded. | A re-run with different defaults is not comparable. | **Closed.** The published protocol is `oha --no-tui -z 5m -w -c <plane-conc> <url>/log?count=20` (CloudHub 1.0 at `-c 10` over `http`, CloudHub 2.0 at `-c 5` over `https`), oha defaults for everything else, text output; the harness also runs Test 1 (`-z 1m`) and Test 4 (`-z 5m -t 30s`). §7 carries it verbatim, and `README.md` and `docs/index.html` both publish it. |
+| **The warmup was described but not scripted.** "3 requests, 10 s pause" — sequential or concurrent? Same endpoint? Counted? | Minor, but it is the difference between a primed and an unprimed flusher. | **Closed.** The harness that produced the published 2026-10-12 figures sends 5 light warmups (`/log?count=1`) one after another, discarded, then a 30 s drain before the measured window; light, so the warmup does not pre-load the stock flusher's backlog. The manual variant in §7 is 5 `curl --connect-timeout 15 --max-time 60` calls to the same `/log?count=20` endpoint, then a 10 s pause and a 10 s settle after the measured run; if you use it, say so in the report. The July run used 3. |
 | **Neither region is recorded.** Not for CH1, not for CH2, not for the load generator. | Was believed to be the single biggest reproducibility hole and the cause of the CH1-vs-CH2 gap. | **Closed, and the hypothesis it supported is falsified** — both planes were in the same region (§11). Still choose one region up front (§1), set it explicitly (§4), pick a CH2 space in it (§5), check the two match (§6) and record all three locations (§8), as hygiene. |
-| **The July load parameters were not the same on the two planes.** The harness drove CloudHub 1.0 at `-c 10` / `count=30` and CloudHub 2.0 at `-c 5` / `count=15`, and the two planes over different schemes. | Any cross-plane reading measures the parameter difference as much as the platform. | **Permanently open for the July figures, closed for the current ones.** Little's Law puts the July runs at `-c 10` (§11) but cannot resolve `count=`, and no raw output survives to settle it. The current protocol holds `count=20` over plain `http` on both planes, at `-c 10` on CloudHub 1.0 and `-c 5` on CloudHub 2.0 (§7), recorded per run (§8). |
-| **Which run produced the July figures.** At least two Datadog runs exist and their numbers differ by up to 4× on CloudHub 2.0. | The July table cannot be traced to a procedure, only to prose. | **Unresolvable after the fact, and superseded.** The 2026-08-04 run is published with its parameters recorded; do not cite the July figures as a platform comparison, or as current. |
-| **The vendor region is not recorded** in the report. The app config pins neither: the Datadog demos default to Datadog's primary intake host and read `dd.site` per deployment, the New Relic demos likewise read `nr.logHost`, so the intake used is a property of the run, not of the repo. | Intake latency and rate limits are region-specific. | State both in the report, and record the `dd.site` and `nr.logHost` values — each identical across its own pair (§3, §8). |
+| **The July load parameters were not the same on the two planes.** The harness drove CloudHub 1.0 at `-c 10` / `count=30` and CloudHub 2.0 at `-c 5` / `count=15`, and the two planes over different schemes. | Any cross-plane reading measures the parameter difference as much as the platform. | **Permanently open for the July figures, closed for the current ones.** Little's Law puts the July runs at `-c 10` (§11) but cannot resolve `count=`, and no raw output survives to settle it. The current protocol holds `count=20` on both planes, CloudHub 1.0 at `-c 10` over `http` and CloudHub 2.0 at `-c 5` over `https` (§7), recorded per run (§8). |
+| **Which run produced the July figures.** At least two Datadog runs exist and their numbers differ by up to 4× on CloudHub 2.0. | The July table cannot be traced to a procedure, only to prose. | **Unresolvable after the fact, and superseded.** The published run is 2026-10-12, with its parameters recorded (the 2026-08-04 run it replaced is history too); do not cite the July figures as a platform comparison, or as current. |
+| **The vendor region is not recorded** in the report. The app config pins neither: the Datadog demos default to Datadog's primary intake host and read `dd.site` per deployment, the New Relic demos likewise read `nr.logHost`, so the intake used is a property of the run, not of the repo. | Intake latency and rate limits are region-specific. | State all three in the report, and record the `dd.site` and `nr.logHost` values and the Elasticsearch project region — each identical across its own pair (§3, §8). The published run: Datadog `ap2` (Sydney), New Relic US, Elasticsearch Serverless in Sydney. |
 | **No run log.** No raw oha output, no app logs, no timestamps are kept in the repo — nor beside the harness, whose results directory does not exist. | Nothing can be re-derived or audited, which is the reason several rows above can only be closed by re-running. | Save the JSON output and the appender heartbeat lines under `docs/benchmark-runs/` (gitignored if large), and keep them for as long as the figures are published. |
 | **The New Relic pair was never benchmarked** before the 2026-08-04 run. | The New Relic figures are a first measurement; there is no prior New Relic figure to reproduce or contradict. | **Closed.** The protocol now drives the New Relic pair in every phase (§7). Label its figures as a first measurement rather than a re-run, and do not read them against the Datadog pair (§12 item 8). |
 | **The exact appender build is unidentified.** Version `0.1.3` covers at least two materially different builds. | Exactly the problem forcing this re-run. | Record the commit SHA — jar digests are per-build and identify nothing across builds (§2), so they are a build record, not an identifier. |

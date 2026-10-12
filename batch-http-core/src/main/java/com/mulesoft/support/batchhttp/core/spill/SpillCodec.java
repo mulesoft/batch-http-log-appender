@@ -25,9 +25,10 @@ import com.mulesoft.support.batchhttp.core.LogRecord;
  * {@link SpillSegmentWriter}/{@link SpillReader}, and which framing a segment uses is
  * chosen by its codec via {@link #framingVersion()} (stamped into the segment header):
  * <ul>
- *   <li>{@code VERSION_V1} — a 4-byte big-endian length prefix per record (JSON/legacy).</li>
+ *   <li>{@code VERSION_V1} — a 4-byte big-endian length prefix per record (legacy: JSON
+ *       segments written by 0.1.5 and earlier).</li>
  *   <li>{@code VERSION_V2} — a self-synchronizing {@code [SYNC(4)][length(4)][crc32c(4)]}
- *       envelope (the binary default; see {@link SpillFrameV2}) that lets the reader skip a
+ *       envelope (both built-in codecs; see {@link SpillFrameV2}) that lets the reader skip a
  *       record damaged mid-segment and resync on the next intact one.</li>
  * </ul>
  * Framing is therefore codec-dependent; {@link SpillSegmentHeader} records both the codec
@@ -68,8 +69,8 @@ public interface SpillCodec {
 
     /**
      * Which per-record framing this codec's segments use (see {@link SpillSegmentHeader}).
-     * Binary opts into the crash-resilient, self-synchronizing {@code VERSION_V2} framing;
-     * JSON keeps the simpler {@code VERSION_V1}. Default is v1 so any future codec is safe
+     * Both built-in codecs opt into the crash-resilient, self-synchronizing
+     * {@code VERSION_V2} framing (JSON since 0.2.0). Default is v1 so any future codec is safe
      * until it explicitly upgrades.
      */
     default byte framingVersion() {

@@ -28,83 +28,121 @@ mvn install -DskipTests
 cd demo/java/benchmark && mvn exec:java
 ```
 
-### Measured on CloudHub (real Datadog and New Relic intake)
+### Measured on CloudHub (real Datadog, New Relic and Elasticsearch intake)
 
-Two batch/stock pairs — one shipping to **Datadog**, one to **New Relic** — were deployed to
-**both CloudHub 1.0 and CloudHub 2.0** (0.1 vCore each) and load-tested with
-[`oha`](https://github.com/hatoo/oha) over a **5-minute** sustained run. Each request hits
-`/log?count=20`, emitting **22 log events** (a `batch.start`, 20 `order.processed`, a
-`batch.completed`). Each app was restarted and warmed before the run. **Concurrency differs by
-plane — CloudHub 1.0 at `-c 10`, CloudHub 2.0 at `-c 5`** — because the CloudHub 2.0 replica is
-a capped-CPU, no-swap worker held at lower concurrency to stay off its OOM ceiling; **so
-compare only within a plane, never CloudHub 1.0 against CloudHub 2.0.** Every run finished at
-**100% success**. Measured 2026-08-04. **Full report (charts, percentiles, all four tests):**
+Three batch/stock pairs — one shipping to **Datadog** (site `ap2`, Sydney), one to **New Relic**
+(US intake), one to **Elasticsearch** (Elastic Cloud Serverless, Sydney) — were deployed to
+**both CloudHub 1.0 and CloudHub 2.0** (0.1 vCore each, all in Sydney), twelve apps in all, and
+load-tested with [`oha`](https://github.com/hatoo/oha) over a **5-minute** sustained run. Each
+request hits `/log?count=20`, emitting **22 log events** (a `batch.start`, 20 `order.processed`,
+a `batch.completed`). The batch apps run engine 0.2.0 with `maxBatchRecords=200`, one flusher,
+`gzip="false"` and **disk spill on**. The three vendors ran as parallel lanes with one app per
+vendor at a time, and every test started on a freshly restarted, lightly warmed app (except the
+churn window, which follows Test 1 with no restart). **Logs delivered** were counted at each
+vendor. **Concurrency differs by plane — CloudHub 1.0 at
+`-c 10`, CloudHub 2.0 at `-c 5`** — because the CloudHub 2.0 replica is a capped-CPU, no-swap
+worker held at lower concurrency to stay off its OOM ceiling; **so compare only within a plane,
+never CloudHub 1.0 against CloudHub 2.0.** Every run in the tables below finished at **100%
+success**.
+Measured 2026-10-12. **Full report (charts, percentiles, logs delivered, all four tests):**
 [`docs/benchmark-results.md`](docs/benchmark-results.md) (rendered natively on GitHub); the
 styled standalone view is [`docs/index.html`](docs/index.html) (open it locally after cloning).
 
 **Throughput gain, batch versus stock, within each vendor-and-platform pair (5-minute run):**
 
-| Platform | Datadog | New Relic |
-|----------|--------:|----------:|
-| CloudHub 1.0 — 0.1 vCore worker (`-c 10`) | **55.5×** | **133.8×** |
-| CloudHub 2.0 — 0.1 vCore replica (`-c 5`) | **7.6×** | **55.9×** |
+| Platform | Datadog | New Relic | Elasticsearch |
+|----------|--------:|----------:|--------------:|
+| CloudHub 1.0 — 0.1 vCore worker (`-c 10`) | **53.5×** | **110.8×** | **139.5×** |
+| CloudHub 2.0 — 0.1 vCore replica (`-c 5`) | **28.5×** | **59.5×** | **48.6×** |
 
 The stock `<Http>` appender ships one synchronous POST per event on a single background
 flusher; under sustained concurrency that flusher never catches up, so its throughput
 collapses and its tail latency climbs into the multi-second — sometimes tens-of-seconds —
 range. The batch appender coalesces events and enqueues non-blocking, so request latency stays
-decoupled from intake latency.
+decoupled from intake latency. The batch apps delivered **100%** of their logs to Datadog and
+Elasticsearch in every test; the stock apps delivered 14–83% in Test 1 and Test 3, because
+whatever is still queued in memory when the next restart comes is lost. New Relic batch reads
+lower in this 5-minute test for a reason covered in the caveats below.
 
 **CloudHub 1.0** — 0.1 vCore worker, `-c 10`, 5-minute run:
 
-| App | req/s | Requests | Mean | p50 | p90 | p99 |
-|-----|------:|---------:|-----:|----:|----:|----:|
-| **Datadog — batch 0.1.3** | **151.12** | **45,343** | **66 ms** | **52 ms** | **96 ms** | **304 ms** |
-| Datadog — stock `<Http>` | 2.72 | 840 | 3,630 ms | 323 ms | 11,504 ms | 14,857 ms |
-| **New Relic — batch 0.1.3** | **160.60** | **48,190** | **62 ms** | **52 ms** | **88 ms** | **238 ms** |
-| New Relic — stock `<Http>` | 1.20 | 421 | 7,725 ms | 386 ms | 22,649 ms | 55,227 ms |
+| App | req/s | Requests | Mean | p50 | p90 | p99 | Delivered |
+|-----|------:|---------:|-----:|----:|----:|----:|----------:|
+| **Datadog — batch 0.2.0** | **140.24** | **42,080** | **71 ms** | **51 ms** | **128 ms** | **226 ms** | **100.0%** |
+| Datadog — stock `<Http>` | 2.62 | 811 | 3,771 ms | 311 ms | 11,025 ms | 13,172 ms | 57.1% |
+| **New Relic — batch 0.2.0** | **133.72** | **40,121** | **75 ms** | **53 ms** | **129 ms** | **322 ms** | **44.5%** |
+| New Relic — stock `<Http>` | 1.21 | 412 | 7,882 ms | 326 ms | 33,261 ms | 58,127 ms | 35.6% |
+| **Elasticsearch — batch 0.2.0** | **136.15** | **40,852** | **73 ms** | **54 ms** | **128 ms** | **270 ms** | **100.0%** |
+| Elasticsearch — stock `<Http>` | 0.98 | 353 | 9,432 ms | 348 ms | 39,738 ms | 66,552 ms | 36.1% |
 
 **CloudHub 2.0** — 0.1 vCore replica, `-c 5`, 5-minute run:
 
-| App | req/s | Requests | Mean | p50 | p90 | p99 |
-|-----|------:|---------:|-----:|----:|----:|----:|
-| **Datadog — batch 0.1.3** | **43.53** | **13,060** | **115 ms** | **96 ms** | **200 ms** | **503 ms** |
-| Datadog — stock `<Http>` | 5.75 | 1,741 | 867 ms | 211 ms | 4,738 ms | 7,367 ms |
-| **New Relic — batch 0.1.3** | **42.57** | **12,774** | **117 ms** | **96 ms** | **202 ms** | **513 ms** |
-| New Relic — stock `<Http>` | 0.76 | 248 | 6,400 ms | 481 ms | 23,037 ms | 34,612 ms |
+| App | req/s | Requests | Mean | p50 | p90 | p99 | Delivered |
+|-----|------:|---------:|-----:|----:|----:|----:|----------:|
+| **Datadog — batch 0.2.0** | **42.03** | **12,610** | **119 ms** | **98 ms** | **203 ms** | **498 ms** | **100.0%** |
+| Datadog — stock `<Http>` | 1.48 | 447 | 3,373 ms | 4,979 ms | 5,744 ms | 8,215 ms | 83.0% |
+| **New Relic — batch 0.2.0** | **45.09** | **13,529** | **111 ms** | **95 ms** | **196 ms** | **476 ms** | **77.3%** |
+| New Relic — stock `<Http>` | 0.76 | 248 | 6,285 ms | 399 ms | 23,575 ms | 35,185 ms | 37.6% |
+| **Elasticsearch — batch 0.2.0** | **35.68** | **10,708** | **140 ms** | **107 ms** | **249 ms** | **663 ms** | **100.0%** |
+| Elasticsearch — stock `<Http>` | 0.73 | 241 | 6,487 ms | 650 ms | 26,504 ms | 39,651 ms | 32.9% |
 
 Each pair is a batch-versus-stock contrast within one vendor on one platform; the two tables
 are not a controlled comparison of each other (different concurrency, different CPU models —
-see the caveats below). Across all four stock runs the p99 tail lands between **7 s and 55 s**,
-against batch p99s of 238 ms to 513 ms.
+see the caveats below). Across all six stock runs the p99 tail lands between **8 s and 67 s**,
+against batch p99s of 226 ms to 663 ms. `Delivered` is the logs that reached the vendor ÷ the
+logs the measured requests generated (HTTP 200 responses × 22): Elasticsearch counted by event
+time inside the load window, Datadog and New Relic by arrival time, from the test's start to the
+next test on the same app.
 
-Every run validates against Little's Law — requests/sec × mean latency ≈ the plane's
-concurrency — so the load parameters are corroborated by the results rather than merely
-asserted. Latency figures from [`oha` 1.14.0](https://github.com/hatoo/oha) may carry a ×10
-unit-selection display glitch, which prints a `0.0774 10 sec`-style value where it means
-`0.774 sec`; the figures above are already normalised (the correction touches latency only,
-not request counts or requests/sec).
+Every 5-minute run in the tables above validates against Little's Law — requests/sec × mean
+latency is within 8% of the plane's concurrency — so the load parameters are corroborated by the
+results rather than merely asserted. That does not hold for every run in the full report: where
+requests fail or time out (Test 4, New Relic on CloudHub 1.0 in the churn window) or a long stock
+tail drains past the deadline (the 1-minute tests), the product falls below `-c`. Latency figures are from [`oha`](https://github.com/hatoo/oha) 1.16, whose output
+shows none of the ×10 unit-selection display glitch of 1.14.0 that the earlier runs had to
+normalise.
 
 **Read all of this as directional.** Every caveat below ships with the figures:
 
-- **One run per pair, no median.** These are single measurements, not repeated ones. The
+- **One run per app, no median.** These are single measurements, not repeated ones. The
   pattern is directional, not established.
 - **⚠ Cold-start caveat.** The batch appender is CPU/JIT-bound and warmup-sensitive, so a
   **1-minute** run under-reports its warm throughput (e.g. CloudHub 2.0 Datadog batch rises
-  **13.8 → 43.5 req/s** from a 1-minute run to the 5-minute run above as the fixed cold-start
+  **14.4 → 42.0 req/s** from a 1-minute run to the 5-minute run above as the fixed cold-start
   cost amortises). The 5-minute figures above are the better read of sustained warm throughput;
   the full report shows the 1-minute Test 1, the in-thread churn window, this 5-minute Test 3,
   and a 30s-cap Test 4 side by side.
 - **Concurrency differs by plane** (CH1 `-c 10`, CH2 `-c 5`), so the two tables are not a
-  controlled comparison of each other. The next benchmark round plans to even concurrency
-  across planes.
-- **`gzip` and `spillEnabled` were disabled in the demos**, so this measures batching in
-  isolation rather than the appender as it would be deployed. Compression is off precisely
-  because the stock `<Http>` appender cannot compress and leaving it on would vary two things
-  at once; a production deployment should leave both on.
+  controlled comparison of each other.
+- **Three vendor lanes ran in parallel**, one app per vendor at a time, each against its own
+  intake. As a control, against a sequential, Elasticsearch-only run of 2026-10-11,
+  Elasticsearch stock req/s in the parallel lanes was within 3% on CloudHub 2.0 in the 5-minute
+  rounds. On CloudHub 1.0 it was −3.3% in Test 4 and −14.6% in Test 3; an earlier parallel round
+  of the same stock apps read +2.9% and −7.1% there, so a single CloudHub 1.0 stock run moves
+  that much on its own.
+- **Spill is on and `gzip` is off.** Spill costs batch req/s where the queue overflows the
+  whole time (New Relic on CloudHub 1.0 in the churn window: 42 req/s) but not in the 5-minute
+  tests. Compression is off because the stock `<Http>` appender cannot compress, and leaving it
+  on would vary two things at once; a production deployment should leave it on.
 - **Throughput and mean latency are one measurement, not two.** The load is closed-loop
   (`oha` with no rate limit), so requests per second is the arithmetic consequence of mean
   latency, not an independent win. The percentiles are unaffected.
+- **New Relic results depend on location.** The apps run in Sydney (`ap-southeast-2`), next to
+  Datadog's `ap2` site and the Elasticsearch project. New Relic offers only US and EU regions;
+  these apps ship to the US endpoint (`log-api.newrelic.com`), so every batch crosses the
+  Pacific and the backlog drains at about 330 logs/s. Requests per second measures how
+  responsive the app stays, not how many logs arrive. New Relic batch delivered about 96–107%
+  in Test 1 and churn, **44.5% (CloudHub 1.0) and 77.3% (CloudHub 2.0) in the 5-minute Test 3
+  above**, and 100% in Test 4. The Test 3 shortfall is a restart, not a drop: the 5-minute
+  burst spilled to disk faster than the US intake took it, and the backlog was still draining
+  when the next round's restart replaced the worker (CloudHub 1.0 restarts onto a new worker,
+  2.0 onto a new pod), so `/tmp` and the spill files went with it. Test 4 was the last round;
+  nothing restarted after it, and its backlog drained in about 12 minutes. Workers closer to
+  the New Relic region, or `gzip` plus more `flusherThreads`, ship faster.
+- **Correction to the 2026-08-04 run.** Its CloudHub 2.0 Datadog stock app carried a leftover
+  `AsyncLoggerConfig.RingBufferSize=20000` and `log4j2.debug=true` that no other app had. It
+  measured 5.75 req/s with them against 1.46 without, so the published 7.6× is not comparable;
+  a re-test without them gave about 31×. This run's app has neither property.
 
 ### Ingest lag: generation → arrival in Datadog
 
@@ -203,7 +241,7 @@ flowchart TD
 **Prerequisites:** JDK 17+ and Maven 3.8+ (`java -version`, `mvn -version`).
 
 The project is a Maven multi-module reactor (`groupId` `com.mulesoft.support.batchhttp`, version
-`0.1.5`). To build everything and install the artifacts into your local
+`0.2.0`). To build everything and install the artifacts into your local
 Maven repository (`~/.m2/repository`) so other projects can depend on them:
 
 ```bash
@@ -231,7 +269,7 @@ After install, the artifacts are available to other builds as:
 <dependency>
     <groupId>com.mulesoft.support.batchhttp</groupId>
     <artifactId>batch-http-log4j2</artifactId>
-    <version>0.1.5</version>
+    <version>0.2.0</version>
 </dependency>
 ```
 
@@ -302,18 +340,11 @@ side-by-side (ports 8081 vs 8082) against a local mock intake and compare reques
 and wall-clock to quantify the batching speedup. See that module's README for the
 step-by-step measurement guide and a ready-to-run mock.
 
-Note that **both batch demo apps deliberately override three library defaults**, in each case
+Note that **the batch demo apps deliberately override two library defaults**, in each case
 to keep the A/B varying only the appender:
 
 - **`gzip="false"`** (library default `true`). The stock `<Http>` appender has no compression
   option, so leaving gzip on would make the pair differ by batching *and* compression.
-- **`spillEnabled="false"`** (library default `true`). The disk-spill buffer runs a replay
-  driver thread, adds transient replay workers, and does disk I/O on the failure and overflow
-  paths — real competitors for a 0.1 vCore worker or a CPU-capped CloudHub 2.0 replica, and
-  machinery the stock appender has no equivalent of. With it off, the batch demos also revert
-  to dropping on queue overflow, so **`dropped` is their overload signal, not
-  `spilledRecords`** — the reverse of the library default described under "Disk-spill buffer"
-  below. Every other `spill*` attribute stays in those files but is inert.
 - **`includeTimestamp="false"`** (library default `true`). This one is not about the stock
   appender's capabilities but about what stays observable: with the vendor's reserved
   event-time field omitted, the vendor stamps each record with its own *arrival* time, so
@@ -321,10 +352,18 @@ to keep the A/B varying only the appender:
   the generation time, hiding shipping delay by construction. The stock siblings omit it the
   same way — their layouts carry no such key — so both halves are measured identically.
 
-The first two are the right production settings — a real deployment should leave compression
-and spill on — so treat them as separate measurements rather than properties of these demos.
-The third is a measurement decision either way: a production app usually *wants* its own
-event time.
+The first is the right production setting to change back — a real deployment should leave
+compression on. The second is a measurement decision either way: a production app usually
+*wants* its own event time.
+
+**Disk spill is on**, the library default: the batch demos ship
+`spillEnabled="${sys:batch.spillEnabled:-true}"`, so queue overflow and batches that fail every
+retry go to disk and replay when the intake catches up, and `spilledRecords` is the overload
+signal. Set the system property `batch.spillEnabled=false` to measure batching alone; overflow
+then drops per `overflowPolicy` and `dropped` becomes the signal. The spill buffer's replay
+threads and disk I/O share a 0.1 vCore worker or a CPU-capped CloudHub 2.0 replica with request
+handling; in the 2026-10-12 benchmark that cost batch req/s only where the queue overflowed the
+whole time.
 
 #### Datadog flavor of the same pair
 
@@ -613,7 +652,7 @@ traces) rides along as attributes.
 | `initialRetryBackoffMillis` | 200 | backoff before the first retry (doubles each attempt); a server-supplied `Retry-After` takes precedence over it |
 | `maxRetryBackoffMillis` | 10000 | ceiling for the wait — applies both to the exponential schedule and to a `Retry-After` value |
 | `requestTimeoutMillis` | 10000 | per-request HTTP timeout |
-| `shutdownDrainTimeoutMillis` | 5000 | max time to drain+flush the queue on stop |
+| `shutdownDrainTimeoutMillis` | 5000 | max time the flushers get to send what is queued on stop. Records still queued after it are written to the spill buffer and replayed on the next start (spill on with `spillRecoveryMode=ADOPT`), or counted as `dropped` with an ERROR (spill off, or a `DELETE`/`IGNORE` recovery mode that would not replay them) — never lost silently |
 | `flusherThreads` | 1 | background sender threads |
 | `trustAllCertificates` | false | **insecure.** trust any server TLS certificate (self-signed/unknown CA), per-appender. For an internal collector only. See "TLS" below |
 | `verifyHostName` | true | **insecure when false.** skip TLS hostname verification (Log4j2's attribute name); JVM-global — see the caveat under "TLS" below |
@@ -621,7 +660,7 @@ traces) rides along as attributes.
 | `includeStackTrace` | true | render a logged `Throwable` into the record (vendor field varies; see matrix below). Set false to ship message-only |
 | `includeTimestamp` | true | emit the vendor's **reserved event-time** field from the log event's own timestamp — Datadog's `date`, New Relic's `timestamp`. Set false to omit it, which leaves the vendor stamping each record with its own **arrival** time instead, making shipping delay observable (see matrix below). Only the datadog and newrelic sinks read it; splunk, dynatrace, elasticsearch and generic always emit their own time field (Elasticsearch data streams require `@timestamp`). The default is `true`, so an existing configuration behaves exactly as before |
 | `ignoreExceptions` | true | standard Log4j2 flag: when true, an error inside the appender is logged internally and swallowed; set false to let it propagate to the caller |
-| `diagnosticsLevel` | WARN | verbosity of the appender's **own** health log (written to Log4j2's `StatusLogger`, not back through this appender). `WARN` surfaces dropped batches, fatal (4xx) rejections, and queue overflow; `INFO` adds the stats heartbeat; `DEBUG` adds per-retry chatter. See "Troubleshooting & diagnostics" below |
+| `diagnosticsLevel` | WARN | verbosity of the appender's **own** health log (written to Log4j2's `StatusLogger`, not back through this appender). `WARN` surfaces dropped batches, fatal (4xx) rejections, and queue overflow; `INFO` adds the stats heartbeat plus the crash-recovery ("recovered N spill segment(s)…"), `DELETE`-discard and lock-takeover lines; `DEBUG` adds per-retry chatter. See "Troubleshooting & diagnostics" below |
 | `statsIntervalMillis` | 0 (off) | when > 0, emit a one-line stats heartbeat (`accepted`/`sentRecords`/`dropped`/`queueDepth`/spill) this often, so you can confirm delivery is healthy without inspecting the spill directory. Needs `diagnosticsLevel` `INFO` or finer to show |
 
 > **Default changes — read before upgrading.** Five defaults have moved, and each of them
@@ -682,6 +721,21 @@ traces) rides along as attributes.
 > Elasticsearch refused transiently and counts permanent refusals as `dropped`
 > (see "Per-vendor examples"). No other sink's behavior changed. Every release is listed in
 > [CHANGELOG.md](CHANGELOG.md).
+
+<!-- -->
+
+> **New in v0.2.0 — Elasticsearch as a first-class vendor, spill accounting and crash
+> recovery:** the minor version marks Elasticsearch (added in 0.1.5) as a supported vendor
+> alongside Datadog, Splunk HEC, New Relic and Dynatrace, and the benchmark now covers it,
+> with logs delivered measured at every vendor. The batch demos run with disk spill on. In
+> the engine, records in an evicted spill segment
+> are now counted (`spillStats().droppedRecords` / `evictedRecords`) and reported in a
+> coalesced WARN. A spill refusal is counted once, not twice. Records still queued when the
+> appender stops are spilled for the next start, or counted as dropped. After a runtime/JVM
+> crash the spilled segments replay as soon as the app starts again. Only intact records are
+> re-sent; damaged ones are skipped and counted. `spillFormat="JSON"` segments now use the same
+> corruption-tolerant framing as `BINARY` (older JSON segments still read). Read "Crash
+> recovery" and "The invariant to check" below if you alert on the spill counters.
 
 The engine also respects the hard per-request intake limits each sink declares — a record
 count and an uncompressed body size, drawn from that vendor's documented ceilings — and
@@ -820,7 +874,11 @@ rendered stack trace are left as-is.
   so a hostile or absurd delay cannot park a flusher, and an absent, malformed, or
   already-elapsed value falls back to the exponential schedule.
 - **Graceful shutdown** — `appender.stop()` drains and flushes the queue within
-  `shutdownDrainTimeout`.
+  `shutdownDrainTimeout`. After that, whatever is still queued is written to the spill
+  buffer (replayed on the next start under `spillRecoveryMode=ADOPT`), or counted as dropped
+  and logged at ERROR when spill is off or `spillRecoveryMode` is `DELETE`/`IGNORE` (the next
+  start would not replay them). `close()` itself never makes another HTTP attempt,
+  so it stays bounded (roughly `shutdownDrainTimeout` + 2 s + the spill write).
 - **Message size capping** — a single oversized message is truncated to
   `maxMessageBytes` (default 32 KiB) on a character boundary before it can bloat the
   queue, the request, or a spill segment. See "Message size capping" above.
@@ -828,23 +886,29 @@ rendered stack trace are left as-is.
   (or records the queue would drop on overflow) are written to rotating segment
   files on disk instead of being lost. A background thread re-ships them when the
   endpoint recovers, and segments left by a previous run/crash are replayed on
-  startup. The buffer is bounded and free-space-aware (drop-oldest eviction), so
-  it never exhausts the filesystem. The binary on-disk format is **corruption-tolerant**:
-  a record damaged by an improperly-closed journal is skipped and replay resumes from
-  the next intact one. Replay is **at-least-once** — a segment that fails partway through
-  is retried whole, so a record that transits the buffer can be delivered twice. See
-  "Disk-spill buffer" below.
+  startup. The buffer is bounded and free-space-aware (drop-oldest eviction, with the
+  evicted records counted and reported), so it never exhausts the filesystem. Both on-disk
+  formats are **corruption-tolerant**: a record damaged by an improperly-closed journal is
+  skipped and replay resumes from the next intact one. Segments survive an abrupt
+  runtime/JVM death (`kill -9`, OOM kill, a crashed worker) and are replayed as soon as the
+  next start opens the same `spillDirectory` with the same `spillInstanceId`; only intact
+  records are re-sent. Replay is **at-least-once** — a segment that fails partway through
+  (or was being replayed when the process died) is retried whole, so a record that transits
+  the buffer can be delivered twice. See "Disk-spill buffer" and "Crash recovery" below.
 - **Observability** — `BatchingLogShipper.stats()` exposes accepted / dropped /
-  sent / failed counts and queue depth; `spillStats()` exposes spilled / evicted /
-  segment counts — plus `corruptBytesSkipped` (bytes discarded recovering a corrupted
-  journal) — when spill is enabled.
+  sent / failed counts and queue depth; `spillStats()` exposes spilled / dropped /
+  evicted (segments and records) / adopted / segment counts — plus `corruptBytesSkipped`
+  (bytes discarded recovering a corrupted journal) — when spill is enabled.
 
 ## Disk-spill buffer
 
 A durability safety net that is **on by default** (`spillEnabled`). Records flow through
 the in-memory queue exactly as normal; they are written to disk **only** when (a) a batch
-fails after retries are exhausted, or (b) the in-memory queue would otherwise drop a record
-on overflow. The happy path does **zero** disk I/O.
+fails after retries are exhausted, (b) the in-memory queue would otherwise drop a record
+on overflow, or (c) records are still queued when the appender stops after
+`shutdownDrainTimeout` — this last case happens regardless of `spillOnOverflow`, but only
+with `spillRecoveryMode=ADOPT` (otherwise those records are counted as dropped). The happy
+path does **zero** disk I/O.
 
 ### It is on by default — read this before upgrading
 
@@ -922,6 +986,9 @@ background replayer re-ships segments once the endpoint is healthy and deletes e
 success; on startup it recovers any segments left by a previous run or crash. The buffer
 is bounded by both a total-bytes cap and a filesystem free-space floor — when either is
 hit, the **oldest** segment is deleted to make room, so logging can never exhaust the disk.
+The records in an evicted segment are counted in `spillStats().droppedRecords` (and
+`evictedRecords`) and reported by a coalesced WARN, so the loss is never silent. A segment a
+replay worker is reading is never evicted.
 
 **Replay is at-least-once, not exactly-once.** A segment has no durable read cursor: if it
 ships partway and then the endpoint starts failing — say the first 300 of 500 records are
@@ -933,7 +1000,10 @@ logs a duplicate is a far cheaper failure than a loss. The live (non-spilled) pa
 unaffected, and duplicates only arise from a *partially* failed segment, so they are rare
 in practice — but if something downstream consumes these logs and must not see repeats,
 de-duplicate on a stable field (the preserved event timestamp plus the message, or your own
-event id) rather than assuming the buffer suppresses them.
+event id) rather than assuming the buffer suppresses them. Two more sources of duplicates:
+a sub-batch delivered just before the process died, in a segment not yet deleted, is sent
+again by the next start; and a send interrupted at shutdown may already have reached the
+intake, yet its batch is spilled and replayed.
 
 **Segment sizing is fuzzy and never splits a record.** Before each record is written, the
 active segment's size is checked (against an in-memory byte counter — no `stat` syscall)
@@ -944,8 +1014,8 @@ oversized segment rather than a record torn across two files. (The free-space fl
 skipped entirely when `minFreeDiskBytes` is 0 — to keep the spill path cheap on
 CPU-throttled workers.)
 
-**Crash-corruption tolerance (binary format).** The binary format frames each record as
-`SYNC + length + CRC32C + payload`. If a runtime crash leaves the journal improperly
+**Crash-corruption tolerance (both formats).** Both formats frame each record as
+`SYNC + length + CRC32C + payload` (`JSON` since 0.2.0). If a runtime crash leaves the journal improperly
 closed and a record corrupted — a torn tail, a zero-filled block, or bit-rot in the
 middle of a segment — the reader detects the bad frame (failed sync, insane length, or
 CRC mismatch), **skips exactly the damaged record, and resumes from the next intact one**,
@@ -959,8 +1029,12 @@ why the counter earns its keep: zero records recovered *and* zero bytes skipped 
 wholly destroyed journal indistinguishable from one that never held anything.
 
 The CRC is computed only on the spill path (the abnormal case) and uses the JDK's
-hardware-accelerated CRC-32C, so steady-state healthy logging pays nothing. The JSON format
-keeps the simpler length-prefixed framing (torn-tail tolerant) for human readability.
+hardware-accelerated CRC-32C, so steady-state healthy logging pays nothing. `JSON` segments
+written by 0.1.5 and earlier keep the older length-prefixed (v1) framing and are still read.
+For those, a crash loses only the torn last record, but damage in the middle ends that
+segment; the discarded bytes are counted in `corruptBytesSkipped`. A damaged or missing
+segment header no longer silently empties a segment: the reader salvages the intact frames
+behind it and counts the rest.
 
 Turn it off, or point it somewhere durable, in `log4j2.xml`:
 
@@ -976,16 +1050,76 @@ Turn it off, or point it somewhere durable, in `log4j2.xml`:
 | `spillDirectory` | `${java.io.tmpdir}/batch-http-spill/<sink>` (`%TEMP%\...` on Windows) | base directory for segment files; derived from the JVM temp dir when unset. Set it explicitly where the temp dir is memory-backed — see "It is on by default" above |
 | `spillInstanceId` | appender `name` (engine falls back to the sink name) | identifier embedded in each segment file name (`spill-<instanceId>-<seq>.log`) so two or more apps sharing a spill directory never overwrite each other's logs; must be stable across restarts of the same app and distinct per running instance |
 | `maxSpillFileBytes` | 8388608 (8 MiB) | segment size before rotation (fuzzy — a record always lands whole in one segment, even if larger than this). A quarter of the total cap, so the buffer holds four segments: eviction sheds a quarter of the backlog at a time, and three closed segments stay replayable while a fourth fills |
-| `maxTotalSpillBytes` | 33554432 (32 MiB) | total cap; exceeding it evicts the oldest segment |
-| `minFreeDiskBytes` | 268435456 (256 MiB) | filesystem free-space floor; dropping below it evicts the oldest segment. It bounds the impact on the **volume**, not on this buffer, so it is deliberately not scaled to `maxTotalSpillBytes` — the spill directory usually shares a filesystem with the runtime's own logs and temp files, and this is the margin left for them. On a volume with less than this usable, spill degrades to counting drops rather than writing; lower it for a small dedicated volume. The probe is a syscall, so it is throttled (≈ once per few MB written); set to 0 to disable it and skip the syscall entirely |
-| `spillReplayIntervalMillis` | 10000 | how often the replayer attempts to drain segments |
+| `maxTotalSpillBytes` | 33554432 (32 MiB) | total cap; exceeding it evicts the oldest segment. Evicted records are counted in `spillStats().droppedRecords`/`evictedRecords` and reported by a coalesced WARN |
+| `minFreeDiskBytes` | 268435456 (256 MiB) | filesystem free-space floor; dropping below it evicts the oldest segment. It bounds the impact on the **volume**, not on this buffer, so it is deliberately not scaled to `maxTotalSpillBytes` — the spill directory usually shares a filesystem with the runtime's own logs and temp files, and this is the margin left for them. On a volume with less than this usable, spill degrades to counting drops rather than writing; lower it for a small dedicated volume. The probe is a syscall, so it is throttled (≈ once per few MB written); set to 0 to disable it and skip the syscall entirely. Evicted records are counted and reported as for `maxTotalSpillBytes` |
+| `spillReplayIntervalMillis` | 10000 | how often the replayer attempts to drain segments. When segments are already on disk at startup (a previous run or a crash), the first pass runs immediately |
 | `spillOnOverflow` | true | also divert queue-overflow records to disk (vs. dropping them) |
-| `spillFormat` | `BINARY` | on-disk record encoding: `BINARY` (compact TLV, all charsets, **corruption-tolerant** sync+CRC framing) or `JSON` (human-readable, torn-tail-tolerant framing) |
+| `spillFormat` | `BINARY` | on-disk record encoding: `BINARY` (compact TLV, all charsets, **corruption-tolerant** sync+CRC framing) or `JSON` (human-readable, same corruption-tolerant sync+CRC framing since 0.2.0) |
 | `spillRecoveryMode` | `ADOPT` | what to do with segments left by a previous run: `ADOPT` replays them, `IGNORE` leaves them untouched, `DELETE` discards them at startup |
 | `spillStartupReconcile` | true | at startup, evict oldest segments to satisfy the total cap and free-space floor before writing new logs |
 | `spillBacklogOrder` | `OLDEST_FIRST` | drain order: `OLDEST_FIRST`, `NEWEST_FIRST`, or `DUAL_STREAM` (ship freshest logs and the historical backlog in parallel) |
 | `spillReplayThreads` | 1 | parallel replay workers (forced to 2 for `DUAL_STREAM`) |
 | `spillReplayMaxBytesPerSec` | 0 | throttle the backlog drain to this many on-disk bytes/sec (0 = unlimited) so replay never starves live traffic |
+
+### Crash recovery (runtime / JVM death)
+
+What happens when the Mule runtime or the JVM dies without stopping the appender (`kill -9`,
+an OOM kill, a worker crash under load):
+
+- **What survives: spilled records, and only those.** Every record the spill buffer reported as
+  spilled had already been handed to the OS when `spill` returned, so a *process* death loses
+  none of them. Records that were only in memory at that moment are lost: the in-memory
+  queue, the batch a flusher was holding, and a request in flight. The buffer protects what
+  reached disk, not what was waiting to.
+- **Host crash or power loss (best effort).** Segments are fsynced when they roll, when the
+  replayer seals them (once per `spillReplayInterval` while an outage lasts) and on shutdown,
+  and the spill directory is fsynced when a segment is created so its name is durable too
+  (skipped where the OS cannot sync a directory, e.g. Windows). A host failure should
+  therefore lose at most about the last interval or segment of spilled data, provided the
+  filesystem honours fsync; a segment deleted just before the failure can reappear and be
+  replayed again (a duplicate, not a loss). There is deliberately no fsync per record.
+- **Restart.** The next start re-takes the per-instance lock. The lock lives on the open file
+  descriptor, not on the `.spill-<instanceId>.lock` file, so the OS drops it with the dead
+  process; the lock file staying on disk is expected and harmless. The dead process's
+  segments are then adopted (`spillRecoveryMode=ADOPT`) and replay starts **immediately**,
+  without waiting for `spillReplayInterval`, and an INFO line says how much was recovered
+  (shown only with `diagnosticsLevel="INFO"` and `status="INFO"` or finer; the defaults are
+  `WARN`, so confirm recovery from the `adoptedRecords` counter or the heartbeat otherwise).
+  This needs the **same `spillDirectory` and the same `spillInstanceId`**. The instance id
+  defaults to the appender name; for the Generic sink without an explicit id the engine
+  default includes the endpoint host, so changing the host strands the old files.
+- **Damaged records are skipped and counted, never fatal.** A torn trailing frame from the
+  crash, or a record damaged in the middle of a segment, is skipped, and replay resumes at the
+  next intact record. The bytes are counted in `corruptBytesSkipped` and reported by a WARN
+  per segment. A segment that cannot be read at all (an I/O error) is kept, retried on later
+  passes and reported once. It never blocks the segments behind it.
+- **At-least-once across a crash.** A sub-batch delivered just before the crash, in a segment
+  not yet deleted, is sent again after the restart. A live batch whose request reached the
+  intake but whose response never arrived is spilled and re-sent too. De-duplicate
+  downstream if that matters (see "Replay is at-least-once" above).
+- **Lock held at startup.** If another live process holds the lock, the segments are left
+  untouched and a WARN is logged. That process can be a leaked appender in the same JVM after
+  a Mule redeploy, or an NFS lock lease. A second store in the same JVM detects a live holder
+  without opening its lock file (on Linux/macOS closing any descriptor of a file releases the
+  process's lock on it, which would silently hand the directory to another process). Ownership is retried on every replay pass, and the
+  segments are adopted once the holder lets go. Give each concurrently running instance its
+  own `spillInstanceId`.
+- **Platform limits (outside the appender's control).** Recovery needs the spill directory to
+  survive the restart, so it covers **in-place restarts only**. The default
+  `${java.io.tmpdir}` survives a Mule runtime/JVM restart on the same host or VM: on-prem, a
+  VM, or a CloudHub 1.0 worker restarted in place. It does **not** survive these, because they
+  start with an empty `/tmp`:
+  - a **CloudHub 1.0** worker replaced by a new worker — which is what a Runtime Manager
+    restart did in the 2026-10-12 benchmark, so do not count on an application restart from
+    Runtime Manager keeping `/tmp`;
+  - a **CloudHub 2.0** / Runtime Fabric / Kubernetes **pod replacement** (redeploy,
+    rescheduling, node failure, scale-in);
+  - a host reboot that clears `/tmp` (tmpfs or systemd-tmpfiles).
+
+  A container restart inside the same pod keeps only volume-backed paths (for example an
+  `emptyDir` mount), not the container's writable layer, so check what your platform mounts at
+  `/tmp`. Where the platform offers persistent storage and durability across replacement
+  matters, point `spillDirectory` at it.
 
 ### Crash-resilience behavior
 
@@ -1003,7 +1137,9 @@ Turn it off, or point it somewhere durable, in `log4j2.xml`:
   the intake or starve live traffic.
 - **Startup free-space check** (point 3) — with `spillStartupReconcile` on, a run that
   inherits a large backlog on a nearly-full disk evicts the oldest segments to satisfy
-  both `maxTotalSpillBytes` and `minFreeDiskBytes` *before* it writes anything new.
+  both `maxTotalSpillBytes` and `minFreeDiskBytes` *before* it writes anything new. The
+  records in those segments are counted in `spillStats().droppedRecords`/`evictedRecords`,
+  and a one-shot WARN names how many were lost.
 - **On-disk format** (point 4) — `BINARY` is a compact tag-length-value encoding
   (UTF-8 strings, varint lengths) that round-trips every character set — non-Latin
   scripts, emoji, control characters — and is smaller and faster to read/write than
@@ -1024,10 +1160,12 @@ Turn it off, or point it somewhere durable, in `log4j2.xml`:
 
 - **Corrupted-journal recovery** — a record damaged by an improperly-closed journal is
   skipped and replay resumes from the next intact one, rather than everything after the
-  damage being abandoned. This applies to `BINARY` only, which is what the `SYNC + length +
-  CRC32C` framing buys; `JSON` retains torn-tail tolerance, so a crash there loses only the
-  last, partial record. See "Crash-corruption tolerance" above for how the resync stays safe
-  for arbitrary payloads and how the skipped bytes are reported.
+  damage being abandoned. This applies to both formats (`JSON` since 0.2.0), which is what the
+  `SYNC + length + CRC32C` framing buys. Legacy v1 `JSON` segments (0.1.5 and earlier) stop
+  at mid-segment damage, with the discarded bytes counted. An unreadable segment (I/O error)
+  is skipped for that pass and retried later, never blocking the segments behind it. See
+  "Crash-corruption tolerance" above for how the resync stays safe for arbitrary payloads
+  and how the skipped bytes are reported.
 
 - **Per-instance file naming** (`spillInstanceId`) — every segment name carries an
   instance id, so two or more apps that share one spill directory (two same-vendor apps
@@ -1087,22 +1225,39 @@ place Log4j2 reports a bad `log4j2.xml`. Set `status="INFO"` to also see the hea
 | Batch rejected with a 4xx (bad API key, wrong endpoint, payload too large) | `ERROR` | `dropped N record(s) — endpoint rejected the batch (HTTP 403); check credentials/endpoint, retrying will not help` |
 | Bulk intake (Elasticsearch) answered `200` but refused some documents for good (mapping conflict, …) | `ERROR` | `dropped N of M record(s) — the intake accepted the request but refused them (document_parsing_exception: …); retrying will not help` |
 | Send failed after all retries, spill **on** | `WARN` | `send failed after 3 retries (HTTP 503) — spilled N record(s) to disk for retry` |
+| Send failed after all retries, spill **on** but the buffer refused (some of) them | `ERROR` | `dropped N record(s) — send failed after 3 retries (HTTP 503) and the spill buffer refused them (counted in spillStats().droppedRecords)` |
 | Send failed after all retries, spill **off** | `ERROR` | `dropped N record(s) — send failed after 3 retries (…) and spill is disabled` |
 | Queue full (endpoint not keeping up) | `WARN` | coalesced once per 5s: `queue full (capacity=…, policy=DROP_NEWEST): N record(s) dropped, M diverted to spill in the last 5s — the endpoint is not keeping up` |
+| Spill buffer full — oldest segment evicted / new record refused | `WARN` | coalesced, at most once per 5s plus once at shutdown: `spill buffer full (maxTotalSpillBytes=…, minFreeDiskBytes=…): evicted N oldest segment(s) holding M record(s), refused K new record(s) since the last report — those logs are lost` |
+| Startup reconcile evicted a previous run's backlog | `WARN` | `startup reconcile evicted N oldest spill segment(s) holding M record(s) (B bytes) left by a previous run to satisfy maxTotalSpillBytes=…/minFreeDiskBytes=… — those logs are lost` |
+| `spillRecoveryMode=DELETE` discarded previous-run segments | `INFO` | `spillRecoveryMode=DELETE discarded N segment(s) (M record(s), B bytes) left by a previous run` |
+| Segments from a previous run / crash adopted | `INFO` | `recovered N spill segment(s) (B bytes, M record(s)) left by a previous run (spillRecoveryMode=ADOPT) — replaying now` |
+| Spill directory locked by another live instance at startup | `WARN` | `spill directory <dir> is locked by another live instance with spillInstanceId=<id>; N existing segment(s) left untouched (ownership is retried every spillReplayInterval) — give each running instance a distinct spillInstanceId` |
+| That lock was released later and taken over | `INFO` | `spill directory <dir> is no longer locked by another instance — took it over (N segment(s) adopted for replay)` |
+| Replayed segment had damaged bytes | `WARN` | `replayed spill segment <file>: R record(s) delivered, B corrupt byte(s) skipped (torn tail or damaged record)` |
+| Spill segment unreadable (I/O error) | `WARN` | once per segment per run: `spill segment <file> could not be read (<IOException>) — skipped this pass, will retry` |
+| A live batch threw while being serialized/sent (sink bug) | `ERROR` | `dropped N record(s) — unexpected error while batching: …` (only the records the intake had not already stored) |
+| A replayed sub-batch threw while being re-shipped | `ERROR` | `dropped N replayed record(s) — unexpected error while re-shipping: …` |
+| Records still queued at shutdown, spill **on** (`spillRecoveryMode=ADOPT`) | `WARN` | `shutdown: spilled K of N record(s) still queued after shutdownDrainTimeout=5000ms to disk — they will be replayed on the next start` |
+| Records still queued at shutdown, spill **off** (or `spillRecoveryMode` `DELETE`/`IGNORE`) | `ERROR` | `dropped N record(s) still queued at shutdown — not sent within shutdownDrainTimeout=5000ms and spill is disabled` (or `… and spillRecoveryMode=DELETE would not replay them on the next start`) |
+| A record offered while the appender was stopping missed the final drain | `ERROR` | `dropped 1 record(s) offered while the appender was stopping — accepted after the final shutdown drain` (with `ADOPT` spill it is spilled instead) |
+| Records still queued at shutdown, spill refused them | `ERROR` | `dropped M record(s) still queued at shutdown — the spill buffer refused them (counted in spillStats().droppedRecords)` (or `… — could not be spilled within the shutdown budget`) |
 | Spill buffer could not initialise | `ERROR` | `spill disabled — could not initialise spill buffer: AccessDeniedException… (live shipping continues; failed batches will be dropped, not buffered)` |
 | Each retry attempt | `DEBUG` | `send attempt 2/4 failed (HTTP 503), retrying` |
-| Periodic heartbeat (`statsIntervalMillis > 0`) | `INFO` | `stats accepted=… sentRecords=… sentBatches=… dropped=… failedBatches=… queueDepth=… spill{onDiskBytes=… segments=… spilledRecords=… droppedRecords=… evictedSegments=…}` |
+| Periodic heartbeat (`statsIntervalMillis > 0`) | `INFO` | `stats accepted=… sentRecords=… sentBatches=… dropped=… failedBatches=… queueDepth=… spill{onDiskBytes=… segments=… spilledRecords=… droppedRecords=… evictedSegments=… evictedRecords=… adoptedRecords=… corruptBytesSkipped=…}` |
 
 `diagnosticsLevel` (default `WARN`) is the verbosity dial: `WARN` shows every failure above;
-`INFO` adds the heartbeat; `DEBUG` adds per-attempt retry lines. All messages are prefixed
+`INFO` adds the heartbeat and the `INFO` rows above (crash-recovery adoption, `DELETE` discard,
+lock takeover); `DEBUG` adds per-attempt retry lines. All messages are prefixed
 `batch-http[<sinkName>]` so you can grep one appender out of a busy status log.
 
 ### "I see no spill files — is it broken?"
 
 No — that's the **healthy** state. The spill directory is created eagerly at startup (so it
 exists as soon as the appender does, spill being on by default), but segment files are written
-**only on a failure path**: a batch that fails after all retries, or queue overflow with
-`spillOnOverflow`. An empty
+**only on a failure path**: a batch that fails after all retries, queue overflow with
+`spillOnOverflow`, or records still queued when the appender stops after
+`shutdownDrainTimeout` (a slow endpoint at redeploy). An empty
 `${java.io.tmpdir}/batch-http-spill/<sink>` under load means the endpoint is accepting your logs and there is
 nothing to buffer. To confirm delivery positively rather than by the absence of spill files, set
 `statsIntervalMillis` and watch `sentRecords` climb in the heartbeat — or check the intake (e.g.
@@ -1112,8 +1267,10 @@ segment files appear, then drain and delete once connectivity returns.
 ### Programmatic counters
 
 Beyond the logs, `BatchingLogShipper.stats()` and `spillStats()` expose live counters
-(`accepted`/`sentRecords`/`dropped`/`queueDepth`, `spilledRecords`/`droppedRecords`/`segmentCount`)
-for wiring into JMX or a metrics system. The heartbeat line is just these rendered to the status
+(`accepted`/`sentRecords`/`dropped`/`queueDepth`, `spilledRecords`/`droppedRecords`/`segmentCount`,
+`evictedSegments`/`evictedRecords`/`adoptedRecords`/`corruptBytesSkipped`) for wiring into JMX
+or a metrics system. `evictedSegments` also counts segments discarded by
+`spillRecoveryMode=DELETE`. The heartbeat line is just these rendered to the status
 log on a timer. See the invariant below for how they reconcile.
 
 ## Validating memory safety and full drain
@@ -1142,22 +1299,46 @@ term on the right is a place a record can legitimately end up, and **every one i
 counted, never silent**:
 
 - `sentRecords` — delivered to the endpoint (live or via spill replay).
-- `dropped` — shed on purpose by the overflow policy when spill is off/full, a
-  terminal 4xx the engine won't retry, or a document a bulk intake (Elasticsearch) refused
-  for good inside a `200` response.
-- `spillDropped` — the disk buffer itself evicted/refused a record under the
-  total-bytes cap or free-space floor (bounded-buffer back-pressure, by design).
+- `dropped` — shed by the overflow policy when spill is off (or `spillOnOverflow=false`), a
+  terminal 4xx the engine won't retry, a document a bulk intake (Elasticsearch) refused
+  for good inside a `200` response, records still queued at shutdown with spill off (or with
+  a `DELETE`/`IGNORE` recovery mode, or past the shutdown spill budget), and a batch whose
+  serialization threw (a sink bug).
+- `spillDropped` — records the disk buffer lost. That is a record it refused (buffer full:
+  cap or free-space floor with nothing left to evict, including overflow records diverted to a
+  full buffer, an I/O error, the store already closed —
+  including at shutdown), **plus every record inside a segment it evicted as oldest**,
+  counted at eviction time (`evictedRecords` is that part). Bounded-buffer back-pressure, by
+  design. `dropped` and `spillDropped` never overlap: a record the spill refuses is counted
+  only in `spillDropped`, never also in `dropped`.
 
-If `accepted` exceeds that sum, records leaked. If `queueDepth` or `segmentCount` stay
-above zero after `close()` returns **and the endpoint is up**, the drain is incomplete.
-(With the endpoint *down*, a non-zero `segmentCount` at shutdown is expected and
-correct — see the caveat at the end of this section.)
+If `accepted` exceeds that sum, records leaked. `queueDepth` is 0 after every `close()`:
+records still queued at shutdown are spilled (or, with spill off or a non-`ADOPT` recovery
+mode, counted in `dropped`). If
+`segmentCount` stays above zero after `close()` returns **and the endpoint is up**, the drain
+is incomplete. With the endpoint *down*, the books close as
+`accepted == sentRecords + dropped + spillDropped + (records left in spill segments)`, and a
+non-zero `segmentCount` at shutdown is expected and correct: those records replay on the next
+start (see the caveat at the end of this section).
 
 The equality is stated for a **healthy** endpoint for a reason: spill replay is
 at-least-once, so if the endpoint flapped mid-segment, the re-shipped prefix is counted in
 `sentRecords` again and the sum can legitimately come out **above** `accepted`. Read a
 surplus as duplicate delivery (expected, see "Disk-spill buffer"), and only a *shortfall*
-as a leak.
+as a leak. A segment evicted after a partly successful replay pass counts its
+already-delivered prefix as dropped too, which is another source of surplus, never a
+shortfall.
+
+**The counters are per process.** After a restart that adopted segments from a previous run
+or a crash, those records are not in this run's `accepted`, but replaying them adds to
+`sentRecords`, and evicting them adds to `spillDropped`. So the sum can exceed `accepted`;
+read that surplus as recovered records, not a leak. `spillStats().adoptedRecords` is the
+number of intact records adopted at startup, so with a backlog the check becomes
+`accepted + adoptedRecords == sentRecords + dropped + spillDropped` (plus whatever is still
+on disk). Records destroyed by on-disk corruption are reported in bytes
+(`corruptBytesSkipped`), not as records, and are not part of the equality. Segments discarded
+by `spillRecoveryMode=DELETE` are not counted as drops either: they were a previous run's
+records. They are reported in an INFO line and in `evictedSegments`.
 
 ### 1. No unbounded memory growth
 
@@ -1184,9 +1365,9 @@ java -Xmx128m -Xms128m -Xlog:gc -jar your-app.jar
 
 ### 2. Full drain after processing
 
-`close()` (which Log4j2 calls on `appender.stop()`) drains and flushes within
-`shutdownDrainTimeout`, then stops the replayer and seals the spill store. To verify
-nothing is stranded:
+`close()` (which Log4j2 calls on `appender.stop()`) lets the flushers drain and send within
+`shutdownDrainTimeout`, stops the replayer, spills whatever is still queued, then seals (and
+fsyncs) the spill store. To verify nothing is stranded:
 
 ```java
 // In a test or a tiny main(), against a mock intake that records what it receives:
@@ -1206,10 +1387,14 @@ spill files accumulate while the endpoint is down, then `ls` the spill directory
 it empty once a healthy endpoint lets the background replayer drain every segment.
 
 > One caveat to design for, not a leak: if `close()` cannot reach a downed endpoint
-> within `shutdownDrainTimeout`, undelivered records are spilled to disk (not lost) and
-> replayed on the **next** startup (`spillRecoveryMode=ADOPT`). "Full drain" there means
-> across the restart, not within the single process — `segmentCount > 0` at shutdown
-> with a dead endpoint is correct durability behavior, not a stranded-record bug.
+> within `shutdownDrainTimeout`, undelivered records — the failed batches *and* whatever is
+> still queued — are spilled to disk (not lost) and replayed on the **next** startup
+> (`spillRecoveryMode=ADOPT`). "Full drain" there means across the restart, not within the
+> single process — `segmentCount > 0` at shutdown with a dead endpoint is correct durability
+> behavior, not a stranded-record bug. A send interrupted at shutdown may already have reached
+> the intake, so that batch can arrive twice after the replay (at-least-once). A record logged
+> after `stop()` begins is refused by `offer()` (it returns false) and is not counted in
+> `accepted`.
 
 ## Status
 

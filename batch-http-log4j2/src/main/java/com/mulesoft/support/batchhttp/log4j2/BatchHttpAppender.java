@@ -132,7 +132,7 @@ public final class BatchHttpAppender extends AbstractAppender {
     public boolean stop(long timeout, TimeUnit timeUnit) {
         setStopping();
         boolean stopped = super.stop(timeout, timeUnit, false);
-        shipper.close(); // drains and flushes remaining events
+        shipper.close(); // drains and flushes remaining events; spills (or counts) what misses the drain budget
         setStopped();
         return stopped;
     }

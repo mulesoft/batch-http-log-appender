@@ -28,15 +28,23 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.net.InetSocketAddress;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.zip.GZIPInputStream;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 /**
  * Verifies the disk-spill safety net end-to-end: failed batches land on disk, the
@@ -48,6 +56,8 @@ class BatchingLogShipperSpillTest {
     private HttpServer server;
     private final AtomicInteger requestCount = new AtomicInteger();
     private final AtomicInteger recordCount = new AtomicInteger();
+    private final Map<String, AtomicInteger> deliveredByMessage = new ConcurrentHashMap<>();
+    private static final Pattern EVENT = Pattern.compile("event \\d+|poison");
     private volatile int responseStatus = 200;
     private int port;
 
@@ -63,6 +73,10 @@ class BatchingLogShipperSpillTest {
                 if (status >= 200 && status < 300) {
                     int lines = (int) new String(body).lines().filter(l -> !l.isBlank()).count();
                     recordCount.addAndGet(lines);
+                    Matcher m = EVENT.matcher(new String(body, StandardCharsets.UTF_8));
+                    while (m.find()) {
+                        deliveredByMessage.computeIfAbsent(m.group(), k -> new AtomicInteger()).incrementAndGet();
+                    }
                 }
                 requestCount.incrementAndGet();
                 exchange.sendResponseHeaders(status, -1);
@@ -197,6 +211,189 @@ class BatchingLogShipperSpillTest {
             waitFor(() -> shipper.spillStats() != null && shipper.spillStats().spilledRecords > 0, 3000);
             assertTrue(shipper.spillStats().spilledRecords > 0, "overflow records must be spilled, not dropped");
             assertEquals(0, shipper.stats().dropped, "with spillOnOverflow, nothing should be counted dropped");
+        }
+    }
+
+    /** Captures every diagnostic emission. */
+    private static final class CapturingDiagnostics implements Diagnostics {
+        final List<String> warn = new CopyOnWriteArrayList<>();
+        final List<String> all = new CopyOnWriteArrayList<>();
+        @Override public boolean isEnabled(Level level) { return true; }
+        @Override public void log(Level level, String message) {
+            all.add(level + " " + message);
+            if (level == Level.WARN) warn.add(message);
+        }
+        boolean any(Level level, String substring) {
+            return all.stream().anyMatch(l -> l.startsWith(level + " ") && l.contains(substring));
+        }
+    }
+
+    private static long sumOf(List<String> lines, String regex) {
+        Pattern p = Pattern.compile(regex);
+        long sum = 0;
+        for (String l : lines) {
+            Matcher m = p.matcher(l);
+            if (m.find()) sum += Long.parseLong(m.group(1));
+        }
+        return sum;
+    }
+
+    @Test
+    void spillEvictionIsCountedAndReportedInACoalescedWarn(@TempDir Path dir) throws Exception {
+        responseStatus = 503; // nothing gets through, so everything spills into a tiny buffer
+        CapturingDiagnostics diag = new CapturingDiagnostics();
+        BatchConfig config = BatchConfig.builder()
+                .maxBatchRecords(20)
+                .lingerTime(Duration.ofMillis(20))
+                .maxRetries(0)
+                .initialRetryBackoff(Duration.ofMillis(1))
+                .gzip(false)
+                .spillEnabled(true)
+                .spillDirectory(dir)
+                .maxSpillFileBytes(512)
+                .maxTotalSpillBytes(2048)
+                .minFreeDiskBytes(0)
+                .spillReplayInterval(Duration.ofHours(1))
+                .diagnostics(diag)
+                .build();
+
+        int total = 500;
+        BatchingLogShipper shipper = new BatchingLogShipper(liveSink(), config);
+        for (LogRecord r : records(total)) shipper.offer(r);
+        waitFor(() -> {
+            SpillStore.SpillStats sp = shipper.spillStats();
+            return sp.spilledRecords + (sp.droppedRecords - sp.evictedRecords) >= total;
+        }, 10_000);
+        shipper.close();
+
+        BatchingLogShipper.Stats s = shipper.stats();
+        SpillStore.SpillStats sp = shipper.spillStats();
+        assertTrue(sp.evictedRecords > 0, "precondition: the 2 KiB cap forced eviction");
+        assertEquals(0, s.dropped, "spill losses are counted by the store, not again by the shipper");
+        long onDisk = sp.spilledRecords - sp.evictedRecords;
+        assertEquals(s.accepted, s.sentRecords + s.dropped + sp.droppedRecords + onDisk,
+                "accepted == sentRecords + dropped + spillDropped + (records still on disk)");
+
+        List<String> lines = new ArrayList<>();
+        for (String w : diag.warn) if (w.contains("spill buffer full")) lines.add(w);
+        assertTrue(lines.size() >= 1 && lines.size() <= 3, "coalesced, not one line per eviction: " + lines);
+        assertEquals(sp.evictedRecords, sumOf(lines, "holding (\\d+) record"),
+                "the WARN lines account for every evicted record");
+        assertEquals(sp.droppedRecords, sp.evictedRecords + sumOf(lines, "refused (\\d+) new record"),
+                "and for every refused one");
+    }
+
+    @Test
+    void aRefusedLiveSpillIsCountedOnceNotTwice(@TempDir Path dir) throws Exception {
+        responseStatus = 503;
+        BatchingLogShipper shipper = new BatchingLogShipper(liveSink(), spillConfig(dir));
+        try {
+            assumeFalse(!dir.toFile().setWritable(false) || Files.isWritable(dir),
+                    "needs a filesystem that enforces permissions for this user");
+            for (LogRecord r : records(5)) shipper.offer(r);
+            waitFor(() -> shipper.spillStats().droppedRecords >= 5, 5_000);
+            BatchingLogShipper.Stats s = shipper.stats();
+            SpillStore.SpillStats sp = shipper.spillStats();
+            assertEquals(5, s.accepted);
+            assertEquals(5, sp.droppedRecords);
+            assertEquals(0, s.dropped, "the spill's refusal must not be counted a second time in dropped");
+            assertEquals(s.accepted, s.sentRecords + s.dropped + sp.droppedRecords);
+        } finally {
+            dir.toFile().setWritable(true);
+            shipper.close();
+        }
+    }
+
+    @Test
+    void aReplaySubBatchThatThrowsIsDroppedInsteadOfReplayedForever(@TempDir Path dir) throws Exception {
+        LogSink real = liveSink();
+        LogSink throwsOnPoison = new LogSink() {
+            @Override public URI endpoint() { return real.endpoint(); }
+            @Override public Map<String, String> headers() { return real.headers(); }
+            @Override public Limits limits() { return real.limits(); }
+            @Override public String name() { return "PoisonSink"; }
+            @Override public byte[] serialize(List<LogRecord> batch) {
+                for (LogRecord r : batch) {
+                    if ("poison".equals(r.message())) throw new IllegalStateException("cannot serialize");
+                }
+                return real.serialize(batch);
+            }
+        };
+        List<LogRecord> seeded = new ArrayList<>(records(5));
+        seeded.add(LogRecord.builder().timestampMillis(1).level("INFO").loggerName("test")
+                .threadName("main").message("poison").build());
+        for (LogRecord r : records(10).subList(5, 10)) seeded.add(r);
+        try (SpillStore previous = new SpillStore(dir, 1 << 20, 1 << 24, 0, d -> Long.MAX_VALUE / 4,
+                com.mulesoft.support.batchhttp.core.spill.SpillCodec.BINARY,
+                BatchConfig.SpillRecoveryMode.ADOPT, false, "poison")) {
+            previous.spill(seeded);
+        }
+
+        responseStatus = 200;
+        CapturingDiagnostics diag = new CapturingDiagnostics();
+        BatchConfig config = BatchConfig.builder()
+                .maxBatchRecords(5)                     // sub-batches: [e0..e4] [poison,e5..e8] [e9]
+                .lingerTime(Duration.ofMillis(50))
+                .maxRetries(0)
+                .gzip(false)
+                .spillDirectory(dir)
+                .spillInstanceId("poison")
+                .spillReplayInterval(Duration.ofMillis(100))
+                .minFreeDiskBytes(0)
+                .diagnostics(diag)
+                .build();
+        try (BatchingLogShipper shipper = new BatchingLogShipper(throwsOnPoison, config)) {
+            waitFor(() -> { try { return segmentCount(dir) == 0; } catch (Exception e) { return false; } }, 3_000);
+            assertEquals(0, segmentCount(dir), "the segment must be abandoned, not kept and re-sent forever");
+            Thread.sleep(400); // a few more replay intervals: nothing may be sent again
+            deliveredByMessage.forEach((m, c) -> assertEquals(1, c.get(), m + " was delivered more than once"));
+            assertEquals(6, shipper.stats().sentRecords);
+            assertEquals(5, shipper.stats().dropped, "the failing sub-batch is counted as dropped");
+            assertTrue(diag.any(Diagnostics.Level.ERROR, "unexpected error while re-shipping"), diag.all.toString());
+        }
+    }
+
+    @Test
+    void startupReportsAdoptedSegmentsAndALockHeldByAnotherInstance(@TempDir Path dir) throws Exception {
+        try (SpillStore previous = new SpillStore(dir, 1 << 20, 1 << 24, 0, d -> Long.MAX_VALUE / 4,
+                com.mulesoft.support.batchhttp.core.spill.SpillCodec.BINARY,
+                BatchConfig.SpillRecoveryMode.ADOPT, false, "diag")) {
+            previous.spill(records(7));
+        }
+        responseStatus = 503; // keep the adopted segment on disk while the second engine starts
+        CapturingDiagnostics first = new CapturingDiagnostics();
+        CapturingDiagnostics second = new CapturingDiagnostics();
+        BatchConfig.Builder cfg = BatchConfig.builder()
+                .maxRetries(0).gzip(false).spillDirectory(dir).spillInstanceId("diag")
+                .spillReplayInterval(Duration.ofHours(1)).minFreeDiskBytes(0);
+        try (BatchingLogShipper owner = new BatchingLogShipper(liveSink(), cfg.diagnostics(first).build());
+             BatchingLogShipper sibling = new BatchingLogShipper(liveSink(), cfg.diagnostics(second).build())) {
+            assertTrue(first.any(Diagnostics.Level.INFO, "recovered 1 spill segment(s)"), first.all.toString());
+            assertTrue(first.any(Diagnostics.Level.INFO, "7 record(s)) left by a previous run"), first.all.toString());
+            assertTrue(second.any(Diagnostics.Level.WARN, "is locked by another live instance with spillInstanceId=diag"),
+                    second.all.toString());
+        }
+    }
+
+    @Test
+    void startupReconcileEvictionIsReportedAsALoss(@TempDir Path dir) throws Exception {
+        try (SpillStore previous = new SpillStore(dir, 512, 1 << 24, 0, d -> Long.MAX_VALUE / 4,
+                com.mulesoft.support.batchhttp.core.spill.SpillCodec.BINARY,
+                BatchConfig.SpillRecoveryMode.ADOPT, false, "reconcile")) {
+            previous.spill(records(100));
+        }
+        responseStatus = 503;
+        CapturingDiagnostics diag = new CapturingDiagnostics();
+        BatchConfig config = BatchConfig.builder()
+                .maxRetries(0).gzip(false).spillDirectory(dir).spillInstanceId("reconcile")
+                .maxSpillFileBytes(512).maxTotalSpillBytes(2048).minFreeDiskBytes(0)
+                .spillReplayInterval(Duration.ofHours(1)).diagnostics(diag).build();
+        try (BatchingLogShipper shipper = new BatchingLogShipper(liveSink(), config)) {
+            SpillStore.SpillStats sp = shipper.spillStats();
+            assertTrue(sp.evictedRecords > 0);
+            assertEquals(sp.evictedRecords, sp.droppedRecords);
+            assertTrue(diag.any(Diagnostics.Level.WARN, "startup reconcile evicted " + sp.evictedSegments
+                    + " oldest spill segment(s) holding " + sp.evictedRecords + " record(s)"), diag.all.toString());
         }
     }
 

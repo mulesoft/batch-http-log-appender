@@ -58,10 +58,15 @@ class SpillReaderTruncationTest {
     }
 
     private List<LogRecord> readAll(Path segment) throws IOException {
+        return readAll(segment, null);
+    }
+
+    private List<LogRecord> readAll(Path segment, long[] skippedOut) throws IOException {
         List<LogRecord> out = new ArrayList<>();
         try (SpillReader r = new SpillReader(segment, MAX)) {
             LogRecord rec;
             while ((rec = r.next()) != null) out.add(rec);
+            if (skippedOut != null) skippedOut[0] = r.corruptBytesSkipped();
         }
         return out;
     }
@@ -91,8 +96,10 @@ class SpillReaderTruncationTest {
         Path seg = dir.resolve("truncated.log");
         Files.write(seg, bos.toByteArray());
 
-        List<LogRecord> got = readAll(seg);
+        long[] skipped = {0};
+        List<LogRecord> got = readAll(seg, skipped);
         assertEquals(3, got.size(), "the 3 intact records survive; the torn tail is skipped");
+        assertEquals(4 + 10, skipped[0], "the torn tail (prefix + the 10 bytes that made it) is counted");
     }
 
     @Test
@@ -104,8 +111,10 @@ class SpillReaderTruncationTest {
         Path seg = dir.resolve("partial-len.log");
         Files.write(seg, bos.toByteArray());
 
-        List<LogRecord> got = readAll(seg);
+        long[] skipped = {0};
+        List<LogRecord> got = readAll(seg, skipped);
         assertEquals(1, got.size());
+        assertEquals(2, skipped[0], "a partial length prefix is a torn tail, not a clean end of file");
     }
 
     @Test
@@ -114,12 +123,16 @@ class SpillReaderTruncationTest {
         bos.write(header());
         bos.write(frame(CODEC.encode(rec(0))));
         bos.write(new byte[]{(byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF}); // -1
-        bos.write(CODEC.encode(rec(1)));
+        byte[] after = CODEC.encode(rec(1));
+        bos.write(after);
         Path seg = dir.resolve("neg-len.log");
         Files.write(seg, bos.toByteArray());
 
-        List<LogRecord> got = readAll(seg);
+        long[] skipped = {0};
+        List<LogRecord> got = readAll(seg, skipped);
         assertEquals(1, got.size(), "reader stops at the corrupt length rather than resyncing");
+        assertEquals(4 + after.length, skipped[0],
+                "v1 cannot recover what follows a corrupt length, but it must report it as lost");
     }
 
     @Test
@@ -136,17 +149,82 @@ class SpillReaderTruncationTest {
     }
 
     @Test
+    void undecodablePayloadEndsTheSegmentAndIsCounted(@TempDir Path dir) throws Exception {
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        bos.write(header());
+        bos.write(frame(CODEC.encode(rec(0))));
+        byte[] junk = frame(new byte[]{1, 2, 3});          // well-framed, but not a record
+        byte[] next = frame(CODEC.encode(rec(2)));
+        bos.write(junk);
+        bos.write(next);
+        Path seg = dir.resolve("bad-payload.log");
+        Files.write(seg, bos.toByteArray());
+
+        try (SpillReader r = new SpillReader(seg, MAX)) {
+            assertNotNull(r.next());
+            assertNull(r.next(), "v1 stops at a payload that does not decode");
+            long settled = r.corruptBytesSkipped();
+            assertEquals(junk.length + next.length, settled, "the undecodable frame and everything after it");
+            assertNull(r.next());
+            assertNull(r.next());
+            assertEquals(settled, r.corruptBytesSkipped(), "the remainder is counted exactly once");
+        }
+    }
+
+    @Test
+    void countRecordsMatchesWhatNextVisitsWithoutDecoding(@TempDir Path dir) throws Exception {
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        bos.write(header());
+        for (int i = 0; i < 4; i++) bos.write(frame(CODEC.encode(rec(i))));
+        bos.write(new byte[]{0, 0, 0, 100});
+        bos.write(new byte[10]);                            // torn tail
+        Path seg = dir.resolve("count.log");
+        Files.write(seg, bos.toByteArray());
+
+        assertEquals(4, SpillReader.countRecords(seg, MAX));
+        assertEquals(4, readAll(seg).size());
+        assertEquals(-1, SpillReader.countRecords(dir.resolve("missing.log"), MAX),
+                "an unreadable segment reports an unknown count");
+    }
+
+    @Test
     void emptyOrHeaderlessSegmentYieldsNoRecords(@TempDir Path dir) throws Exception {
         // A file too short to even hold a header (e.g. crash before the header flushed)
         // must yield zero records rather than throw.
         Path tooShort = dir.resolve("short.log");
         Files.write(tooShort, new byte[]{1, 2, 3});
-        assertEquals(0, readAll(tooShort).size());
+        long[] skipped = {0};
+        assertEquals(0, readAll(tooShort, skipped).size());
+        assertEquals(3, skipped[0], "a torn header is reported, not mistaken for an empty segment");
+
+        // A crash between creating the file and writing its header leaves zero bytes: nothing lost.
+        Path empty = dir.resolve("empty.log");
+        Files.write(empty, new byte[0]);
+        assertEquals(0, readAll(empty, skipped).size());
+        assertEquals(0, skipped[0]);
 
         // A valid header with no frames after it.
         Path headerOnly = dir.resolve("header-only.log");
         Files.write(headerOnly, header());
-        assertEquals(0, readAll(headerOnly).size());
+        assertEquals(0, readAll(headerOnly, skipped).size());
+        assertEquals(0, skipped[0]);
+    }
+
+    @Test
+    void v1SegmentWithDamagedHeaderCountsEveryByte(@TempDir Path dir) throws Exception {
+        // v1 has no sync markers, so a smashed header leaves nothing to salvage — but the loss
+        // must be visible rather than the segment silently deleted as "empty".
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        bos.write(header());
+        for (int i = 0; i < 3; i++) bos.write(frame(CODEC.encode(rec(i))));
+        byte[] bytes = bos.toByteArray();
+        bytes[0] = 'X';
+        Path seg = dir.resolve("bad-magic.log");
+        Files.write(seg, bytes);
+
+        long[] skipped = {0};
+        assertEquals(0, readAll(seg, skipped).size());
+        assertEquals(bytes.length, skipped[0]);
     }
 
     @Test

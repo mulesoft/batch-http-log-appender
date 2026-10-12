@@ -2,8 +2,128 @@
 
 All notable changes to the Batch HTTP Log Appender are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
-[Semantic Versioning](https://semver.org/). The README's "New in v0.1.x" notes carry the
+[Semantic Versioning](https://semver.org/). The README's "New in v0.x" notes carry the
 longer, upgrade-oriented explanation of each release.
+
+## [0.2.0] — 2026-10-12
+
+The minor version marks Elasticsearch as a first-class vendor alongside Datadog, Splunk HEC,
+New Relic and Dynatrace. The sink and its per-document bulk retry shipped in 0.1.5; 0.2.0 adds
+the durability and accounting work below, runs every demo with disk spill on, and republishes
+the CloudHub benchmark with all three vendors and measured log delivery. No configuration
+changes are needed to upgrade from 0.1.5.
+
+### Fixed
+- **Evicted spill records are now counted.** When the spill buffer deletes its oldest segment
+  to stay under `maxTotalSpillBytes` or above `minFreeDiskBytes`, during spilling or in the
+  startup reconcile, the records in that segment are added to `spillStats().droppedRecords`
+  and to the new `evictedRecords`. That includes segments adopted from a previous run.
+  Before, only `evictedSegments` moved, so `accepted == sentRecords + dropped + spillDropped`
+  fell short after any eviction. The store keeps a per-segment record count: counted as
+  records are written for this run's segments, and by a decode-free CRC scan for adopted ones.
+- **A record the spill buffer refuses is counted once**, in `spillStats().droppedRecords`.
+  Before, it was also added to `stats().dropped`, on the failed-batch path and on the
+  queue-overflow path.
+- **Records still queued at shutdown are no longer lost uncounted.** After
+  `shutdownDrainTimeout`, `close()` writes whatever is still in the queue to the spill buffer,
+  regardless of `spillOnOverflow`, and the next start replays it. With spill off or
+  unavailable, or with `spillRecoveryMode` `DELETE`/`IGNORE` (the next start would not replay
+  them), it counts those records as `dropped` and logs an ERROR with the count.
+  `close()` never makes another HTTP attempt for them, so it stays bounded. The POISON
+  shutdown sentinel is never spilled, shipped or counted, and `queueDepth` is 0 after every
+  `close()`.
+- A flusher interrupted at shutdown hands its in-flight batch to the spill buffer at once
+  (with `spillRecoveryMode=ADOPT`), instead of retrying past the grace window and being
+  refused by a store that has already closed. With other modes it keeps its real send attempt.
+- A record offered while `close()` runs can no longer be stranded in the queue, even when the
+  offer is still in progress after `close()` stops waiting for it: an offer that lands after
+  the final drain spills or counts its own record.
+- **Crash recovery replays at startup.** Segments adopted from a previous run or a crash now
+  replay on the first pass, right after the appender starts, instead of one
+  `spillReplayInterval` (10 s) later. Before, a runtime in a crash loop never replayed its
+  backlog.
+- A spill segment that cannot be read (an I/O error) no longer blocks every later segment.
+  It is kept, retried on later passes, and reported once. Draining continues with the
+  segments behind it.
+- A segment evicted between being listed and being claimed by a replay worker no longer
+  aborts the pass. Eviction never deletes a segment a worker is replaying.
+- A damaged or missing segment header no longer makes the segment look empty, which got it
+  deleted with nothing counted. The reader salvages the intact frames behind the header and
+  counts the rest as corrupt.
+- v1-framed segments (JSON written by 0.1.5 and earlier) now report the bytes they discard
+  in `corruptBytesSkipped`: a torn tail, a corrupt length, a partial length prefix, or a
+  payload that does not decode.
+- A disk error part-way through a batch no longer counts records already written as dropped.
+  It also no longer leaves a torn frame in the middle of a segment: the next record goes to a
+  fresh segment.
+- A replay sub-batch whose serialization throws is counted as dropped (ERROR logged) instead
+  of keeping the segment and re-sending the sub-batches before it on every pass.
+- A record larger than `maxSpillFileBytes` (written whole into an oversized segment) is no
+  longer rejected as corrupt on replay.
+- A live batch whose serialization throws is counted as dropped, not lost uncounted. Only the
+  records the intake had not already stored are counted: a bulk retry subset that fails to
+  serialize after a partial acceptance no longer counts the stored records as sent *and* dropped.
+- **A second same-id store in one JVM no longer releases the first store's directory lock.**
+  On Linux and macOS closing any descriptor of a file drops the process's lock on it, so a
+  store that probed a lock file held in the same JVM (a leaked appender after a Mule redeploy,
+  a Log4j2 reconfiguration) freed it for other processes on every replay pass. A second
+  runtime sharing the directory could then adopt, replay and delete a live store's segments.
+  Stores now take a JVM-wide claim (shared across classloaders) before opening the lock file.
+- Spill bookkeeping: `totalBytes` now includes segment headers, deleting a segment that is
+  already gone no longer decrements `segmentCount`, and a segment that `DELETE` recovery could
+  not delete no longer counts toward the cap.
+
+### Changed
+- `spillFormat="JSON"` segments now use the same `SYNC + length + CRC32C` framing as
+  `BINARY`. Damage in the middle of a JSON segment is skipped instead of ending it, and a
+  flipped byte is rejected by the checksum instead of being delivered garbled. The payload is
+  still readable JSON. This release still reads v1 JSON segments written by 0.1.5 and earlier,
+  and a 0.1.5 reader can read the new segments.
+- Spill segments are fsynced when they roll, when the replayer seals them (once per replay
+  pass) and on shutdown, and the spill directory is fsynced (best effort) when a segment is
+  created. A host crash or power loss should now lose at most about one replay interval or one
+  segment of spilled data, where the filesystem honours fsync. Process crashes were already safe: each frame is
+  handed to the OS before `spill` returns.
+- `close()` gives the flushers one shared 2 s grace after interrupting them, rather than 2 s
+  each. It restores the caller's interrupt flag, and an interrupted caller no longer cuts the
+  joins short.
+- A second store with the same `spillInstanceId` creates its segment files exclusively, so
+  two writers never append to the same file.
+- **Demos: disk spill is on by default** in the Datadog, New Relic and Elastic batch demos
+  (`spillEnabled="${sys:batch.spillEnabled:-true}"`, the library default). Set the property
+  `batch.spillEnabled=false` to measure batching alone. The demos build against `0.2.0`.
+- **Benchmark republished** (`docs/benchmark-results.md`, `docs/index.html`, `docs/img/`): all
+  twelve demo apps (Datadog, New Relic, Elastic × CloudHub 1.0 / 2.0 × batch / stock) on
+  engine 0.2.0 with spill on, run as three parallel vendor lanes with one app per vendor at a
+  time, and with logs delivered counted at each vendor. It also corrects the CloudHub 2.0
+  Datadog stock result: the earlier run's stock app carried a leftover
+  `AsyncLoggerConfig.RingBufferSize=20000` and `log4j2.debug=true`, which made stock look
+  about four times faster than it is. A caveat now notes that New Relic results depend on
+  location: the workers run in Sydney and New Relic's intake is in the US.
+
+### Added
+- Coalesced WARN when the spill buffer evicts or refuses records: `spill buffer full (…):
+  evicted N oldest segment(s) holding M record(s), refused K new record(s) since the last
+  report — those logs are lost`. There is also a one-shot WARN for startup-reconcile
+  evictions and an INFO for `spillRecoveryMode=DELETE` discards.
+- Shutdown diagnostics: a WARN `shutdown: spilled K of N record(s) still queued …` and an
+  ERROR for records that could not be spilled or were dropped with spill off.
+- Recovery diagnostics: an INFO when segments from a previous run are adopted, a WARN when
+  the spill directory lock is held by another live instance (ownership is retried every
+  replay pass, and the segments are adopted once the holder lets go), a WARN per replayed
+  segment with corrupt bytes skipped, and a WARN for an unreadable segment.
+- `SpillStats.evictedRecords` and `SpillStats.adoptedRecords`. The stats heartbeat also shows
+  `evictedRecords`, `adoptedRecords` and `corruptBytesSkipped`.
+- Additive API: `SpillStore.LossListener` / `LossKind` and a constructor overload taking one,
+  `SpillStore.spillRecords(List)` (returns how many were written),
+  `SpillStore.tryReacquireOwnership()`, `recoveredSegments()`, `recoveredBytes()`,
+  `ignoredSegments()`, `directory()`, and a `SpillReplayer` constructor overload taking
+  `Diagnostics`.
+- A crash-recovery test forks a real JVM. The child spills through the engine against a dead
+  intake and is killed with `Runtime.halt` (no `close()`). The test then corrupts a record in
+  the middle of a segment and tears the open segment's tail. It proves that, after a restart
+  on the same directory, every intact record is delivered exactly once, the damaged ones are
+  skipped and counted to the byte, and the engine does not hang. It runs for both formats.
 
 ## [0.1.5] — 2026-10-11
 
@@ -92,5 +212,6 @@ No appender code changed.
 - Initial release: the batching Log4j2 appender (`<BatchHttp>`) on a vendor-neutral core
   engine. Pre-publication history lives in the development repository.
 
+[0.2.0]: https://github.com/mulesoft/batch-http-log-appender/compare/v0.1.5...v0.2.0
 [0.1.5]: https://github.com/mulesoft/batch-http-log-appender/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/mulesoft/batch-http-log-appender/releases/tag/v0.1.4

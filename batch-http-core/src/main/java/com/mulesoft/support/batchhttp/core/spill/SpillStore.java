@@ -25,13 +25,17 @@ import java.io.IOException;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.nio.channels.OverlappingFileLockException;
+import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.FileStore;
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Stream;
@@ -59,6 +63,19 @@ import java.util.stream.Stream;
  * filesystem; under sustained pressure it sheds the oldest data. When
  * {@code startupReconcile} is set, the same pruning runs once at construction so a
  * run that inherits a large backlog on a nearly-full disk frees space before writing.
+ * A segment being replayed is never evicted (see {@link #beginReplay}).
+ *
+ * <h2>Accounting contract</h2>
+ * Every record passed to {@link #spill} ends up in exactly one of {@code spilledRecords}
+ * (written) or {@code droppedRecords} (refused: store closed, cap/floor with nothing left
+ * to evict, an I/O error, or a record that could not be encoded). The store does that
+ * counting itself, so a caller must <em>not</em> add a refusal to its own drop counter.
+ * When a segment is evicted, the records it held move into {@code droppedRecords} as well
+ * (and into {@code evictedRecords}): the store tracks a record count per segment, counted
+ * as they are written for this run's segments and by a decode-free scan for adopted ones.
+ * Evictions, cap/floor refusals and {@code DELETE}-recovery discards are also reported to the
+ * optional {@link LossListener}, outside the lock. Refusals by a closed store or after an I/O
+ * error are reported by the caller, which sees them in the return value.
  *
  * <h2>Per-instance file naming (co-located apps)</h2>
  * Every segment file carries the owning instance's id in its name —
@@ -80,6 +97,19 @@ import java.util.stream.Stream;
  * them, {@code DELETE} discards them, {@code IGNORE} leaves them); if the lock is held,
  * a sibling instance with the same id is alive and owns the files, so this instance
  * ignores them rather than double-shipping or deleting them out from under it.
+ *
+ * <p>The lock lives on the open file descriptor, not on the lock file. The OS drops it when
+ * the owning process dies however it dies ({@code kill -9}, OOM kill, a crashed worker), so a
+ * {@code .spill-<instanceId>.lock} file left on disk by a dead process is expected and
+ * harmless: the next run locks it and adopts the dead process's segments. If the lock is
+ * held at startup, {@link #tryReacquireOwnership()} (called on every replay pass) retries it
+ * and adopts the segments that were left alone once the holder lets go.
+ *
+ * <p>Within one JVM, a store never opens a lock file that another live store holds: on POSIX
+ * systems closing any descriptor of a file drops every lock the process holds on it, so even
+ * a probe would silently free the holder's lock for other processes. A JVM-wide claim (shared
+ * across classloaders, so it also covers a store leaked by a previous Mule deployment) is taken
+ * before the file is opened and released when the store closes.
  */
 public final class SpillStore implements Closeable {
 
@@ -88,6 +118,38 @@ public final class SpillStore implements Closeable {
     public interface FreeSpaceProbe {
         long usableBytes(Path dir) throws IOException;
     }
+
+    /** Why records left the buffer without being shipped; see {@link LossListener}. */
+    public enum LossKind {
+        /** Oldest segment(s) evicted for the total cap or the free-space floor while spilling. */
+        EVICTED,
+        /** New record(s) refused: cap/floor reached and nothing left to evict. */
+        REFUSED,
+        /** Oldest segment(s) evicted by the startup reconcile (usually a previous run's backlog). */
+        STARTUP_EVICTED,
+        /**
+         * Previous-run segments discarded by {@code spillRecoveryMode=DELETE}. A planned discard of
+         * records this run never accepted, so they are not added to {@code droppedRecords}.
+         */
+        RECOVERY_DISCARDED
+    }
+
+    /**
+     * Told about every loss the buffer causes, so the host can report it. Invoked outside the
+     * store's lock, possibly from the constructor (startup reconcile, {@code DELETE} recovery)
+     * and from any thread that spills. Must be fast and must not throw.
+     */
+    @FunctionalInterface
+    public interface LossListener {
+        /**
+         * @param segments segments removed (0 for {@link LossKind#REFUSED})
+         * @param records  records lost; records in a segment that could not be read at all are not included
+         * @param bytes    on-disk bytes removed (0 for {@link LossKind#REFUSED})
+         */
+        void onLoss(LossKind kind, int segments, long records, long bytes);
+    }
+
+    private static final LossListener NO_LISTENER = (kind, segments, records, bytes) -> { };
 
     private static final String PREFIX = "spill-";
     private static final String SUFFIX = ".log";
@@ -109,6 +171,7 @@ public final class SpillStore implements Closeable {
     /** On-disk bytes each record's frame adds beyond its payload (v1: 4, v2: 12). */
     private final int frameOverhead;
     private final BatchConfig.SpillRecoveryMode recoveryMode;
+    private final LossListener lossListener;
 
     private final Object writeLock = new Object();
     private final AtomicLong seqGen = new AtomicLong(0);
@@ -134,18 +197,59 @@ public final class SpillStore implements Closeable {
 
     // Pre-existing segments we must not replay or evict (IGNORE mode, or a live sibling owns them).
     private final Set<Long> ignoredSeqs = new HashSet<>();
+    // The subset of ignoredSeqs ignored only because a live sibling held the lock at startup;
+    // tryReacquireOwnership() hands them to the configured recovery mode once it lets go.
+    private final Set<Long> foreignSeqs = new HashSet<>();
+    // Records per segment (under writeLock): counted on append for this run's segments, by a
+    // decode-free scan for adopted ones; -1 when a segment could not be read at all. Read on
+    // eviction so the records a deleted segment held are counted as dropped, not lost silently.
+    private final Map<Long, Long> recordsBySeq = new HashMap<>();
+    // Segments a replay worker is reading right now; eviction skips them (see beginReplay).
+    private final Set<Long> replayingSeqs = new HashSet<>();
+
+    /**
+     * Prefix of the JVM-wide claim a store takes on a lock file before it opens it (see
+     * {@link #claimInJvm}). The claims live in {@link System#getProperties()} because that is
+     * the one map every classloader in the JVM shares: under Mule a leaked store from the
+     * previous deployment and the store of the new one are loaded by different classloaders, so
+     * a static field here would not see the other.
+     */
+    private static final String JVM_LOCK_CLAIM_PREFIX = "com.mulesoft.support.batchhttp.spill.lock:";
 
     // Directory ownership lock; null when locking is unsupported or a sibling holds it.
     private FileChannel lockChannel;
     private FileLock dirLock;
-    private final boolean ownsDirectory;
+    /** JVM-wide claim on our lock file held while {@link #dirLock} is (or is assumed) held; null otherwise. */
+    private String jvmLockClaim;
+    /** Unique value stored under our claims, so a store only ever releases its own. */
+    private final String jvmClaimToken = "SpillStore@" + Integer.toHexString(System.identityHashCode(this))
+            + "/" + System.nanoTime();
+    /** Written under writeLock (constructor, tryReacquireOwnership); volatile for the lock-free getter. */
+    private volatile boolean ownsDirectory;
+
+    // Losses not yet reported to the listener (under writeLock); handed over after the lock is released.
+    private int pendingEvictedSegs;
+    private long pendingEvictedRecs;
+    private long pendingEvictedBytes;
+    private long pendingRefusedRecs;
+    // Previous-run segments discarded by DELETE recovery (constructor / ownership take-over only).
+    private int discardedSegs;
+    private long discardedRecs;
+    private long discardedBytes;
+    // Segments adopted from a previous run (ADOPT), for the startup INFO line.
+    private int recoveredSegments;
+    private long recoveredBytes;
 
     // observability
     private final AtomicLong spilledRecords = new AtomicLong();
     private final AtomicLong spilledBytes = new AtomicLong();
     private final AtomicLong evictedSegments = new AtomicLong();
     private final AtomicLong droppedRecords = new AtomicLong();
-    /** Bytes skipped as corrupt while replaying v2 segments (interior damage recovered around). */
+    /** Records that were inside evicted segments (a subset of droppedRecords). */
+    private final AtomicLong evictedRecords = new AtomicLong();
+    /** Intact records found in segments adopted from a previous run. */
+    private final AtomicLong adoptedRecords = new AtomicLong();
+    /** Bytes skipped as corrupt while replaying segments (torn tails, interior damage recovered around). */
     private final AtomicLong corruptBytesSkipped = new AtomicLong();
 
     /**
@@ -180,6 +284,20 @@ public final class SpillStore implements Closeable {
                       FreeSpaceProbe probe, SpillCodec codec,
                       BatchConfig.SpillRecoveryMode recoveryMode, boolean startupReconcile,
                       String instanceId) throws IOException {
+        this(dir, maxSegmentBytes, maxTotalBytes, minFreeBytes, probe, codec,
+                recoveryMode, startupReconcile, instanceId, null);
+    }
+
+    /**
+     * @param lossListener told about every eviction, refusal and recovery discard (see
+     *                     {@link LossListener}); {@code null} for none. It can be called before
+     *                     this constructor returns.
+     */
+    public SpillStore(Path dir, long maxSegmentBytes, long maxTotalBytes, long minFreeBytes,
+                      FreeSpaceProbe probe, SpillCodec codec,
+                      BatchConfig.SpillRecoveryMode recoveryMode, boolean startupReconcile,
+                      String instanceId, LossListener lossListener) throws IOException {
+        this.lossListener = lossListener != null ? lossListener : NO_LISTENER;
         this.dir = dir;
         this.maxSegmentBytes = maxSegmentBytes;
         this.maxTotalBytes = maxTotalBytes;
@@ -199,7 +317,17 @@ public final class SpillStore implements Closeable {
         if (!this.instanceId.isEmpty() && ownsDirectory) {
             migrateLegacyOrphans();
         }
-        recoverExistingState();
+        try {
+            recoverExistingState();
+        } catch (IOException | RuntimeException e) {
+            // The caller never gets a store to close, so let go of the lock (and the JVM-wide
+            // claim) here; a claim left behind would lock every later store in this JVM out.
+            releaseDirectoryLock();
+            throw e;
+        }
+        if (discardedSegs > 0) {
+            notifyLoss(LossKind.RECOVERY_DISCARDED, discardedSegs, discardedRecs, discardedBytes);
+        }
         if (startupReconcile) {
             reconcileOnStartup();
         }
@@ -220,6 +348,10 @@ public final class SpillStore implements Closeable {
             return; // leave legacy files exactly where they are, untouched
         }
         Path legacyLock = dir.resolve(".spill.lock");
+        // A legacy (id-less) store or a peer migrator in this JVM holds .spill.lock: opening and
+        // closing a channel on it here would release that lock for other processes (see claimInJvm).
+        String claim = claimInJvm(".spill.lock");
+        if (claim == null) return;
         try (FileChannel ch = FileChannel.open(legacyLock,
                 StandardOpenOption.CREATE, StandardOpenOption.WRITE)) {
             FileLock lk = null;
@@ -233,8 +365,14 @@ public final class SpillStore implements Closeable {
                 long next = 0;
                 for (Path p : legacy) {
                     if (recoveryMode == BatchConfig.SpillRecoveryMode.DELETE) {
+                        long size = sizeQuietly(p);
+                        long n = SpillReader.countRecords(p, maxSegmentBytes);
                         try {
-                            Files.deleteIfExists(p);
+                            if (Files.deleteIfExists(p)) {
+                                discardedSegs++;
+                                discardedRecs += Math.max(n, 0);
+                                discardedBytes += size;
+                            }
                         } catch (IOException ignore) {
                             // leave it; it stays id-less and is never replayed by us
                         }
@@ -257,8 +395,10 @@ public final class SpillStore implements Closeable {
                 }
             }
         } catch (OverlappingFileLockException | IOException ignore) {
-            // Another store in this JVM holds the legacy lock, or locking is unsupported.
+            // Something else in this JVM holds the legacy lock, or locking is unsupported.
             // Skip migration; correctness (no double-adopt) is preserved either way.
+        } finally {
+            unclaimInJvm(claim);
         }
     }
 
@@ -313,29 +453,105 @@ public final class SpillStore implements Closeable {
      * acquired it (we own the directory), false if a live sibling holds it. Never
      * throws: if the filesystem does not support locking we assume sole ownership,
      * which is the safe assumption for the common single-process case.
+     *
+     * <p>A lock held by another store in this JVM is detected through the JVM-wide claim,
+     * before any channel is opened (see {@link #claimInJvm}).
      */
     private boolean acquireDirectoryLock() {
+        String claim = claimInJvm(lockFileName);
+        if (claim == null) {
+            return false; // another live SpillStore in THIS JVM holds our lock file
+        }
         try {
             lockChannel = FileChannel.open(dir.resolve(lockFileName),
                     StandardOpenOption.CREATE, StandardOpenOption.WRITE);
             dirLock = lockChannel.tryLock();
             if (dirLock == null) {
-                // A sibling process holds the lock — it owns any existing segments.
+                // A sibling process holds the lock — it owns any existing segments. Closing
+                // our channel is safe: this JVM holds no lock on the file (we had the claim).
                 lockChannel.close();
                 lockChannel = null;
+                unclaimInJvm(claim);
                 return false;
             }
+            jvmLockClaim = claim;
             return true;
         } catch (OverlappingFileLockException e) {
-            // Another SpillStore in THIS JVM already locked the same dir.
+            // Something in THIS JVM outside the claim protocol (not a SpillStore of this
+            // version) locked the file. Treat it as a live holder.
             closeQuietly(lockChannel);
             lockChannel = null;
+            unclaimInJvm(claim);
             return false;
         } catch (IOException e) {
             closeQuietly(lockChannel);
             lockChannel = null;
+            jvmLockClaim = claim; // keep the claim: we act as the owner, so no same-JVM store may too
             return true; // locking unsupported -> assume sole ownership
         }
+    }
+
+    /**
+     * Release {@link #dirLock}, its channel and the JVM-wide claim. Idempotent. The channel is
+     * closed before the claim is dropped, so no other store in this JVM can open the lock file
+     * while we still hold the OS lock through it.
+     */
+    private void releaseDirectoryLock() {
+        if (dirLock != null) {
+            try {
+                dirLock.release();
+            } catch (IOException ignore) {
+                // best effort
+            }
+            dirLock = null;
+        }
+        closeQuietly(lockChannel);
+        lockChannel = null;
+        if (jvmLockClaim != null) {
+            unclaimInJvm(jvmLockClaim);
+            jvmLockClaim = null;
+        }
+    }
+
+    /**
+     * Claim the lock file {@code fileName} in our directory for this store, JVM-wide; returns the
+     * claim key, or {@code null} when another live store in this JVM already holds it.
+     *
+     * <p>Why a claim before the {@link FileLock}: on Linux and macOS a {@code FileLock} is a POSIX
+     * record lock, which belongs to the process, and closing <em>any</em> descriptor of the file
+     * releases every lock the process holds on it. So merely testing a lock file that another store
+     * in this JVM holds — open a second channel, get {@link OverlappingFileLockException}, close
+     * the channel — silently drops that store's lock for every other process, while the JVM still
+     * reports it valid. A second runtime sharing the directory would then adopt and delete a live
+     * store's segments. The claim lets a store see the holder without touching the file.
+     */
+    private String claimInJvm(String fileName) {
+        String key = JVM_LOCK_CLAIM_PREFIX + lockKeyPath(fileName);
+        try {
+            return System.getProperties().putIfAbsent(key, jvmClaimToken) == null ? key : null;
+        } catch (SecurityException e) {
+            return key; // no access to the shared map: fall back to the plain FileLock behaviour
+        }
+    }
+
+    private void unclaimInJvm(String key) {
+        if (key == null) return;
+        try {
+            System.getProperties().remove(key, jvmClaimToken); // only ever our own claim
+        } catch (SecurityException ignore) {
+            // nothing was claimed (see claimInJvm)
+        }
+    }
+
+    /** Canonical path of a file in our directory, so two spellings of one directory share a claim. */
+    private String lockKeyPath(String fileName) {
+        Path base;
+        try {
+            base = dir.toRealPath();
+        } catch (IOException e) {
+            base = dir.toAbsolutePath().normalize();
+        }
+        return base.resolve(fileName).toString();
     }
 
     /**
@@ -357,20 +573,28 @@ public final class SpillStore implements Closeable {
 
             if (mode == BatchConfig.SpillRecoveryMode.DELETE) {
                 long size = sizeQuietly(p);
+                long n = SpillReader.countRecords(p, maxSegmentBytes);
                 try {
                     Files.deleteIfExists(p);
                     evictedSegments.incrementAndGet();
+                    discardedSegs++;
+                    discardedRecs += Math.max(n, 0);
+                    discardedBytes += size;
                 } catch (IOException ignore) {
-                    // Could not delete; fall back to ignoring it so we never replay it.
+                    // Could not delete; fall back to ignoring it so we never replay it. Like any
+                    // ignored segment its bytes are not counted toward the cap: it can never be
+                    // evicted, so counting it would hold overCap() true for good.
                     ignoredSeqs.add(seq);
-                    bytes += size;
                     segs++;
                 }
             } else if (mode == BatchConfig.SpillRecoveryMode.IGNORE) {
                 ignoredSeqs.add(seq);   // leave on disk, but never replay/evict/count
+                if (!ownsDirectory) foreignSeqs.add(seq); // re-examined once the live holder lets go
                 segs++;
             } else { // ADOPT
-                bytes += sizeQuietly(p);
+                long size = sizeQuietly(p);
+                adopt(seq, p);
+                bytes += size;
                 segs++;
             }
         }
@@ -379,53 +603,150 @@ public final class SpillStore implements Closeable {
         segmentsOnDisk = segs;
     }
 
+    /**
+     * Take a previous run's segment into the buffer (under writeLock or from the constructor):
+     * count its intact records without decoding them, so that evicting it later counts what it
+     * held and the startup INFO line can say how much was recovered.
+     */
+    private void adopt(long seq, Path p) {
+        long n = SpillReader.countRecords(p, maxSegmentBytes);
+        recordsBySeq.put(seq, n);
+        if (n > 0) adoptedRecords.addAndGet(n);
+        recoveredSegments++;
+        recoveredBytes += sizeQuietly(p);
+    }
+
     /** Prune oldest segments until both the total-bytes cap and the free-space floor hold. */
     private void reconcileOnStartup() {
+        int segs;
+        long recs, bytes;
         synchronized (writeLock) {
             try {
                 ensureRoomFor(0);
             } catch (IOException ignore) {
                 // best effort; the normal spill path will reconcile again on first write
             }
+            segs = pendingEvictedSegs;
+            recs = pendingEvictedRecs;
+            bytes = pendingEvictedBytes;
+            pendingEvictedSegs = 0;
+            pendingEvictedRecs = 0;
+            pendingEvictedBytes = 0;
+        }
+        if (segs > 0) {
+            notifyLoss(LossKind.STARTUP_EVICTED, segs, recs, bytes);
         }
     }
 
     /**
-     * Persist a batch of records to disk. Thread-safe. Never throws for I/O issues —
-     * on failure it records the drop and returns false (logging must never break logging).
+     * Persist a batch of records to disk. Thread-safe. Never throws — logging must never
+     * break logging.
+     *
+     * <p>Returns {@code true} only when every record was written. Any record not written has
+     * already been counted in {@code droppedRecords} by the store (see the accounting contract
+     * in the class doc), so a caller must not count it again.
      */
     public boolean spill(List<LogRecord> batch) {
         if (batch == null || batch.isEmpty()) return true;
+        return spillRecords(batch) == batch.size();
+    }
+
+    /**
+     * {@link #spill} that reports how many of the batch's records were written. The rest were
+     * refused and are already counted in {@code droppedRecords}.
+     */
+    public int spillRecords(List<LogRecord> batch) {
+        if (batch == null || batch.isEmpty()) return 0;
+        int written = 0;
+        int evictedSegs;
+        long evictedRecs, evictedBytes, refused;
         synchronized (writeLock) {
             if (closed) {
                 // The store has been sealed. Writing now would open a fresh segment that nobody
                 // will ever close — a leaked file handle, and a segment left half-described on
-                // disk. Refuse instead, so the caller counts the records rather than losing them
-                // silently. Reachable when a flusher outlives the drain budget and spills late.
+                // disk. Refuse instead, and count the records here (the caller must not count them
+                // again). Reachable when a flusher outlives the drain budget and spills late.
                 droppedRecords.addAndGet(batch.size());
-                return false;
+                return 0;
             }
+            int i = 0;
             try {
-                for (LogRecord r : batch) {
-                    byte[] payload = codec.encode(r);
+                for (; i < batch.size(); i++) {
+                    byte[] payload;
+                    try {
+                        payload = codec.encode(batch.get(i));
+                    } catch (RuntimeException unencodable) {
+                        droppedRecords.incrementAndGet(); // a codec bug on one record must not lose the batch
+                        continue;
+                    }
                     int frame = frameOverhead + payload.length;
-                    if (!ensureRoomFor(frame)) {
+                    // A frame that starts a new segment also pays for that segment's header.
+                    long need = opensNewSegment(frame) ? frame + SpillSegmentHeader.LENGTH : frame;
+                    if (!ensureRoomFor(need)) {
                         droppedRecords.incrementAndGet();
+                        pendingRefusedRecs++;
                         continue; // nothing left to evict and still no room — drop this record
                     }
                     rollIfNeeded(frame);
                     active.append(payload);
+                    recordsBySeq.merge(active.seq(), 1L, Long::sum);
                     totalBytesOnDisk += frame;
                     bytesSinceFreeProbe += frame; // drives the throttled free-space re-probe
                     spilledRecords.incrementAndGet();
                     spilledBytes.addAndGet(frame);
+                    written++;
                 }
-                return true;
-            } catch (IOException e) {
-                droppedRecords.addAndGet(batch.size());
-                return false;
+            } catch (IOException | RuntimeException e) {
+                // (RuntimeException: e.g. an UncheckedIOException from listing the directory while
+                // looking for a segment to evict — spill() must never throw.)
+                // Record i and everything after it were not written; everything before it was
+                // written or already counted. Count only that remainder. Record i may have left
+                // part of a frame behind (in the stream buffer or on disk), so stop using this
+                // segment: closing it turns the junk into the torn tail of a closed segment, which
+                // the reader skips and counts, instead of something later records are appended
+                // behind. The next record opens a fresh segment.
+                droppedRecords.addAndGet(batch.size() - i);
+                abandonActive();
             }
+            evictedSegs = pendingEvictedSegs;
+            evictedRecs = pendingEvictedRecs;
+            evictedBytes = pendingEvictedBytes;
+            refused = pendingRefusedRecs;
+            pendingEvictedSegs = 0;
+            pendingEvictedRecs = 0;
+            pendingEvictedBytes = 0;
+            pendingRefusedRecs = 0;
         }
+        // Outside the lock: the listener logs, and spillers must never queue behind that I/O.
+        if (evictedSegs > 0) notifyLoss(LossKind.EVICTED, evictedSegs, evictedRecs, evictedBytes);
+        if (refused > 0) notifyLoss(LossKind.REFUSED, 0, refused, 0);
+        return written;
+    }
+
+    private void notifyLoss(LossKind kind, int segments, long records, long bytes) {
+        try {
+            lossListener.onLoss(kind, segments, records, bytes);
+        } catch (RuntimeException ignore) {
+            // a reporting failure must never turn into a spill failure
+        }
+    }
+
+    /** Close the active segment after a failed write so nothing is appended behind a torn frame. */
+    private void abandonActive() {
+        if (active != null) {
+            try {
+                active.close();
+            } catch (IOException ignore) {
+                // the disk is failing; the reader copes with whatever reached it
+            }
+            active = null;
+        }
+    }
+
+    /** True when writing a frame of {@code frameBytes} would open a new segment first (see {@link #rollIfNeeded}). */
+    private boolean opensNewSegment(int frameBytes) {
+        return active == null
+                || (active.bytesWritten() > 0 && active.bytesWritten() + frameBytes > maxSegmentBytes);
     }
 
     /**
@@ -460,23 +781,38 @@ public final class SpillStore implements Closeable {
         return estimatedUsable - incoming < minFreeBytes;
     }
 
-    /** Delete the oldest segment that is neither active nor ignored. Returns false if none. */
+    /**
+     * Delete the oldest segment that is neither active, ignored, nor being replayed, and count
+     * the records it held as dropped. Returns false if there is none.
+     */
     private boolean evictOldestClosed() throws IOException {
         long activeSeq = active != null ? active.seq() : Long.MAX_VALUE;
         Path oldest = null;
         long oldestSeq = Long.MAX_VALUE;
         for (Path p : listSegments()) {
             long seq = seqOf(p);
-            if (seq == activeSeq || ignoredSeqs.contains(seq)) continue;
+            if (seq == activeSeq || ignoredSeqs.contains(seq) || replayingSeqs.contains(seq)) continue;
             if (seq < oldestSeq) { oldestSeq = seq; oldest = p; }
         }
         if (oldest == null) return false;
         long size = sizeQuietly(oldest);
+        Long known = recordsBySeq.get(oldestSeq);
+        // Every segment we write or adopt has an entry; only a file planted behind our back lacks
+        // one, and that is counted the same decode-free way, before it is gone.
+        long records = known != null ? known : SpillReader.countRecords(oldest, maxSegmentBytes);
         Files.deleteIfExists(oldest);
+        recordsBySeq.remove(oldestSeq);
         totalBytesOnDisk -= size;
         if (totalBytesOnDisk < 0) totalBytesOnDisk = 0;
         if (segmentsOnDisk > 0) segmentsOnDisk--;
         evictedSegments.incrementAndGet();
+        if (records > 0) {
+            droppedRecords.addAndGet(records);
+            evictedRecords.addAndGet(records);
+            pendingEvictedRecs += records;
+        }
+        pendingEvictedSegs++;
+        pendingEvictedBytes += size;
         // A delete genuinely frees disk; force the next floor check to re-probe rather than
         // trust the now-stale cached reading (eviction is the rare disk-pressure path, so the
         // extra syscall here is proportionate and keeps the ensureRoomFor loop from over-evicting).
@@ -491,18 +827,63 @@ public final class SpillStore implements Closeable {
             return;
         }
         if (active.bytesWritten() > 0 && active.bytesWritten() + incomingFrameBytes > maxSegmentBytes) {
-            active.close();
+            SpillSegmentWriter full = active;
+            active = null; // never append to a segment whose close (flush + fsync) failed
+            full.close();
             active = openNewSegment();
         }
     }
 
     private SpillSegmentWriter openNewSegment() throws IOException {
-        long seq = seqGen.getAndIncrement();
-        Path file = dir.resolve(segmentPrefix + String.format(SEQ_FORMAT, seq) + SUFFIX);
-        // seqGen always starts past every sequence already on disk, so this file is new.
-        SpillSegmentWriter w = new SpillSegmentWriter(file, seq, codec.codecId(), codec.framingVersion());
-        segmentsOnDisk++;
-        return w;
+        while (true) {
+            long seq = seqGen.getAndIncrement();
+            Path file = segmentPath(seq);
+            // seqGen starts past every sequence on disk at startup, so this file is normally new.
+            // Create it exclusively anyway: a second store with our id (a sibling that held the
+            // lock, or one sharing the directory by mistake) allocates from the same range, and
+            // two writers appending to one file would interleave their frames.
+            try {
+                Files.createFile(file);
+            } catch (FileAlreadyExistsException taken) {
+                continue;
+            }
+            SpillSegmentWriter w;
+            try {
+                w = new SpillSegmentWriter(file, seq, codec.codecId(), codec.framingVersion());
+            } catch (IOException e) {
+                try {
+                    Files.deleteIfExists(file); // don't leave a header-less empty file behind
+                } catch (IOException suppressed) {
+                    e.addSuppressed(suppressed);
+                }
+                throw e;
+            }
+            syncDirectory();
+            recordsBySeq.put(seq, 0L);
+            totalBytesOnDisk += w.bytesWritten(); // the header: eviction later subtracts the real file size
+            segmentsOnDisk++;
+            return w;
+        }
+    }
+
+    /**
+     * Best-effort {@code fsync} of the spill directory, once per new segment. A segment's own
+     * fsync (on roll/seal) makes its <em>data</em> durable, but on POSIX filesystems the new
+     * directory entry is only durable once the directory itself is synced; without this a host
+     * crash or power loss could lose a whole rolled segment. Not needed for a process crash.
+     * Platforms that cannot open a directory (Windows) or sync it simply skip this.
+     */
+    private void syncDirectory() {
+        if (dir.getFileSystem() != FileSystems.getDefault()) return;
+        try (FileChannel ch = FileChannel.open(dir, StandardOpenOption.READ)) {
+            ch.force(true);
+        } catch (IOException | UnsupportedOperationException | SecurityException ignore) {
+            // best effort; includes ClosedByInterruptException for an interrupted flusher
+        }
+    }
+
+    private Path segmentPath(long seq) {
+        return dir.resolve(segmentPrefix + String.format(SEQ_FORMAT, seq) + SUFFIX);
     }
 
     /**
@@ -537,19 +918,103 @@ public final class SpillStore implements Closeable {
         }
     }
 
-    /** Delete a fully-shipped segment and update the byte total. */
+    /** Delete a fully-shipped segment and update the byte total. Also releases a {@link #beginReplay} claim. */
     public void deleteSegment(Path segment) {
         synchronized (writeLock) {
+            long seq = seqOf(segment);
             long size = sizeQuietly(segment);
             try {
-                Files.deleteIfExists(segment);
-                totalBytesOnDisk -= size;
-                if (totalBytesOnDisk < 0) totalBytesOnDisk = 0;
-                if (segmentsOnDisk > 0) segmentsOnDisk--;
+                // Only a file that was really there leaves the books; one already gone was
+                // accounted for by whoever removed it, and decrementing again would drift low.
+                if (Files.deleteIfExists(segment)) {
+                    totalBytesOnDisk -= size;
+                    if (totalBytesOnDisk < 0) totalBytesOnDisk = 0;
+                    if (segmentsOnDisk > 0) segmentsOnDisk--;
+                }
+                recordsBySeq.remove(seq);
             } catch (IOException ignore) {
                 // leave accounting alone; a later pass will retry the delete
+            } finally {
+                replayingSeqs.remove(seq);
             }
         }
+    }
+
+    /**
+     * Claim a segment for a replay worker so eviction cannot delete it mid-read (its records
+     * would then be counted as dropped and as sent). Returns false when the segment is no
+     * longer eligible — evicted or deleted since the pass listed it, or ignored — which is not
+     * an endpoint failure. Released by {@link #deleteSegment} or {@link #endReplay}.
+     */
+    boolean beginReplay(Path segment) {
+        synchronized (writeLock) {
+            long seq = seqOf(segment);
+            if (ignoredSeqs.contains(seq) || (active != null && active.seq() == seq) || !Files.exists(segment)) {
+                return false;
+            }
+            replayingSeqs.add(seq);
+            return true;
+        }
+    }
+
+    /** Release a {@link #beginReplay} claim on a segment that is being kept. */
+    void endReplay(Path segment) {
+        synchronized (writeLock) {
+            replayingSeqs.remove(seqOf(segment));
+        }
+    }
+
+    /**
+     * If a live sibling held the directory lock at startup, try to take it now. On success the
+     * segments left alone at startup are handled per the configured {@code spillRecoveryMode}:
+     * {@code ADOPT} makes them shippable, {@code DELETE} discards them, {@code IGNORE} keeps
+     * leaving them alone. Called at the start of every replay pass, so a holder that stops (or
+     * a leaked store from a previous Mule deployment that is finally closed) hands over within
+     * one interval. Returns whether this store owns the directory.
+     */
+    public boolean tryReacquireOwnership() {
+        if (ownsDirectory) return true;
+        int segs = 0;
+        long recs = 0, bytes = 0;
+        synchronized (writeLock) {
+            if (ownsDirectory) return true;
+            if (closed || !acquireDirectoryLock()) return false;
+            ownsDirectory = true;
+            for (Long seq : foreignSeqs) {
+                Path p = segmentPath(seq);
+                if (!Files.exists(p)) {
+                    // The previous holder shipped or evicted it before letting go.
+                    ignoredSeqs.remove(seq);
+                    if (segmentsOnDisk > 0) segmentsOnDisk--;
+                    continue;
+                }
+                if (recoveryMode == BatchConfig.SpillRecoveryMode.ADOPT) {
+                    ignoredSeqs.remove(seq);
+                    long size = sizeQuietly(p);
+                    adopt(seq, p);
+                    totalBytesOnDisk += size; // segmentsOnDisk already counted it at startup
+                } else if (recoveryMode == BatchConfig.SpillRecoveryMode.DELETE) {
+                    long size = sizeQuietly(p);
+                    long n = SpillReader.countRecords(p, maxSegmentBytes);
+                    try {
+                        if (Files.deleteIfExists(p)) {
+                            ignoredSeqs.remove(seq);
+                            if (segmentsOnDisk > 0) segmentsOnDisk--;
+                            evictedSegments.incrementAndGet();
+                            segs++;
+                            recs += Math.max(n, 0);
+                            bytes += size;
+                        }
+                    } catch (IOException ignore) {
+                        // stays ignored, exactly as at startup
+                    }
+                }
+                // IGNORE: leave them where they are, still never replayed or evicted.
+            }
+            foreignSeqs.clear();
+        }
+        if (segs > 0) notifyLoss(LossKind.RECOVERY_DISCARDED, segs, recs, bytes);
+        return true;
     }
 
     public long totalBytes() {
@@ -559,8 +1024,8 @@ public final class SpillStore implements Closeable {
     }
 
     /**
-     * Record bytes the replayer discarded as corrupt while draining a v2 segment (a record
-     * damaged by an improperly-closed journal that the reader skipped to resync). Surfaced
+     * Record bytes the replayer discarded as corrupt while draining a segment (a torn tail, or
+     * a record damaged by an improperly-closed journal that the reader skipped). Surfaced
      * via {@link #stats()} so corruption recovery is observable rather than silent.
      */
     void addCorruptBytesSkipped(long bytes) {
@@ -577,11 +1042,37 @@ public final class SpillStore implements Closeable {
         return ownsDirectory;
     }
 
+    /** The directory this store keeps its segments in. */
+    public Path directory() {
+        return dir;
+    }
+
+    /** Segments left by a previous run that this store adopted for replay ({@code ADOPT}). */
+    public int recoveredSegments() {
+        synchronized (writeLock) {
+            return recoveredSegments;
+        }
+    }
+
+    /** On-disk bytes of the {@link #recoveredSegments()}. */
+    public long recoveredBytes() {
+        synchronized (writeLock) {
+            return recoveredBytes;
+        }
+    }
+
+    /** Pre-existing segments left untouched: {@code IGNORE} mode, or a live sibling held the lock. */
+    public int ignoredSegments() {
+        synchronized (writeLock) {
+            return ignoredSeqs.size();
+        }
+    }
+
     public SpillStats stats() {
         synchronized (writeLock) {
             return new SpillStats(spilledRecords.get(), spilledBytes.get(),
                     evictedSegments.get(), droppedRecords.get(), segmentsOnDisk, totalBytesOnDisk,
-                    corruptBytesSkipped.get());
+                    corruptBytesSkipped.get(), evictedRecords.get(), adoptedRecords.get());
         }
     }
 
@@ -592,16 +1083,7 @@ public final class SpillStore implements Closeable {
         }
         sealActiveSegment();
         synchronized (writeLock) {
-            if (dirLock != null) {
-                try {
-                    dirLock.release();
-                } catch (IOException ignore) {
-                    // best effort
-                }
-                dirLock = null;
-            }
-            closeQuietly(lockChannel);
-            lockChannel = null;
+            releaseDirectoryLock();
         }
     }
 
@@ -665,15 +1147,28 @@ public final class SpillStore implements Closeable {
 
     /** Immutable diagnostics snapshot. */
     public static final class SpillStats {
-        public final long spilledRecords, spilledBytes, evictedSegments, droppedRecords;
+        public final long spilledRecords, spilledBytes, evictedSegments;
+        /**
+         * Records the buffer lost: refused (store closed, cap/floor with nothing left to evict,
+         * I/O error) plus every record inside an evicted segment. Counted only here, never also
+         * in the shipper's {@code dropped}.
+         */
+        public final long droppedRecords;
         public final int segmentCount;
         public final long totalBytes;
-        /** Bytes discarded as corrupt during v2 replay (interior journal damage recovered around). */
+        /** Bytes discarded as corrupt during replay (torn tails, interior damage recovered around). */
         public final long corruptBytesSkipped;
+        /** Records that were inside evicted segments; part of {@link #droppedRecords}. */
+        public final long evictedRecords;
+        /**
+         * Intact records found in segments adopted from a previous run. They are not in this
+         * run's {@code accepted}, but their replay or eviction lands in this run's counters.
+         */
+        public final long adoptedRecords;
 
         SpillStats(long spilledRecords, long spilledBytes, long evictedSegments,
                    long droppedRecords, int segmentCount, long totalBytes,
-                   long corruptBytesSkipped) {
+                   long corruptBytesSkipped, long evictedRecords, long adoptedRecords) {
             this.spilledRecords = spilledRecords;
             this.spilledBytes = spilledBytes;
             this.evictedSegments = evictedSegments;
@@ -681,13 +1176,16 @@ public final class SpillStore implements Closeable {
             this.segmentCount = segmentCount;
             this.totalBytes = totalBytes;
             this.corruptBytesSkipped = corruptBytesSkipped;
+            this.evictedRecords = evictedRecords;
+            this.adoptedRecords = adoptedRecords;
         }
 
         @Override public String toString() {
             return "SpillStats{spilledRecords=" + spilledRecords + ", spilledBytes=" + spilledBytes
                     + ", evictedSegments=" + evictedSegments + ", droppedRecords=" + droppedRecords
                     + ", segmentCount=" + segmentCount + ", totalBytes=" + totalBytes
-                    + ", corruptBytesSkipped=" + corruptBytesSkipped + '}';
+                    + ", corruptBytesSkipped=" + corruptBytesSkipped
+                    + ", evictedRecords=" + evictedRecords + ", adoptedRecords=" + adoptedRecords + '}';
         }
     }
 }

@@ -26,8 +26,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -361,6 +363,158 @@ class SpillStoreTest {
                      SpillCodec.BINARY, com.mulesoft.support.batchhttp.core.BatchConfig.SpillRecoveryMode.ADOPT, false, "app-b")) {
             assertTrue(appA.ownsDirectory(), "app-a must own its own (id-scoped) lock");
             assertTrue(appB.ownsDirectory(), "app-b must own its own (id-scoped) lock");
+        }
+    }
+
+    /** Records still readable across every shippable segment. */
+    private static long onDisk(SpillStore store) throws IOException {
+        long n = 0;
+        for (Path seg : store.shippableSegments()) {
+            try (SpillReader r = new SpillReader(seg, store.maxSegmentBytes())) {
+                while (r.next() != null) n++;
+            }
+        }
+        return n;
+    }
+
+    private static long fileBytes(Path dir) throws IOException {
+        try (var s = Files.list(dir)) {
+            return s.filter(p -> p.getFileName().toString().startsWith("spill-"))
+                    .mapToLong(p -> p.toFile().length()).sum();
+        }
+    }
+
+    /** A loss listener that records every call. */
+    private static final class Losses implements SpillStore.LossListener {
+        final List<Object[]> calls = new CopyOnWriteArrayList<>();
+        @Override public void onLoss(SpillStore.LossKind kind, int segments, long records, long bytes) {
+            calls.add(new Object[]{kind, segments, records, bytes});
+        }
+        long records(SpillStore.LossKind kind) {
+            return calls.stream().filter(c -> c[0] == kind).mapToLong(c -> (Long) c[2]).sum();
+        }
+        long segments(SpillStore.LossKind kind) {
+            return calls.stream().filter(c -> c[0] == kind).mapToLong(c -> (Integer) c[1]).sum();
+        }
+    }
+
+    private static SpillStore store(Path dir, long seg, long cap, long floor, SpillStore.FreeSpaceProbe probe,
+                                    SpillStore.LossListener listener) throws IOException {
+        return new SpillStore(dir, seg, cap, floor, probe, SpillCodec.BINARY,
+                com.mulesoft.support.batchhttp.core.BatchConfig.SpillRecoveryMode.ADOPT, false, null, listener);
+    }
+
+    @Test
+    void evictedRecordsAreCountedAsDropped(@TempDir Path dir) throws Exception {
+        // Every record handed to spill() must end up on disk or in droppedRecords — including the
+        // ones inside a segment deleted to stay under the cap, which used to vanish uncounted.
+        Losses losses = new Losses();
+        try (SpillStore store = store(dir, 200, 1000, NO_FLOOR, plenty(), losses)) {
+            store.spill(recs(200));
+            store.sealActiveSegment();
+            SpillStore.SpillStats st = store.stats();
+            assertTrue(st.evictedSegments > 0, "precondition: the cap forced eviction");
+            assertEquals(200, st.spilledRecords, "nothing was refused outright");
+            assertEquals(200, onDisk(store) + st.droppedRecords, "conservation across eviction");
+            assertEquals(st.evictedRecords, st.droppedRecords, "with no refusals, every drop is an eviction");
+            assertEquals(st.evictedRecords, losses.records(SpillStore.LossKind.EVICTED),
+                    "the listener hears about every evicted record");
+            assertEquals(st.evictedSegments, losses.segments(SpillStore.LossKind.EVICTED));
+        }
+    }
+
+    @Test
+    void freeSpaceFloorEvictionsAndRefusalsAreCounted(@TempDir Path dir) throws Exception {
+        long floor = 100_000;
+        AtomicInteger probes = new AtomicInteger();
+        // Room for ~3 KB above the floor at first (the writes then cross it), and permanently
+        // below the floor once eviction forces a re-probe.
+        SpillStore.FreeSpaceProbe shrinking = d -> probes.incrementAndGet() == 1 ? floor + 3000 : floor - 1;
+        Losses losses = new Losses();
+        try (SpillStore store = store(dir, 200, BIG, floor, shrinking, losses)) {
+            store.spill(recs(200));
+            store.sealActiveSegment();
+            SpillStore.SpillStats st = store.stats();
+            assertEquals(200, onDisk(store) + st.droppedRecords, "conservation under the free-space floor");
+            assertTrue(st.droppedRecords > st.evictedRecords, "precondition: some records were refused outright");
+            assertEquals(st.droppedRecords - st.evictedRecords, losses.records(SpillStore.LossKind.REFUSED));
+        }
+    }
+
+    @Test
+    void ioFailureMidBatchCountsOnlyTheUnwrittenRemainderAndStartsAFreshSegment(@TempDir Path dir) throws Exception {
+        // The free-space probe is re-run after an eviction; make that one probe fail with an
+        // I/O error part-way through the batch, the way a dying disk would.
+        AtomicInteger probes = new AtomicInteger();
+        SpillStore.FreeSpaceProbe failsOnce = d -> {
+            if (probes.incrementAndGet() == 2) throw new IOException("Input/output error");
+            return BIG;
+        };
+        try (SpillStore store = new SpillStore(dir, 200, 1000, 1, failsOnce)) {
+            assertFalse(store.spill(recs(200)), "a batch that was not fully written reports false");
+            SpillStore.SpillStats st = store.stats();
+            assertTrue(st.spilledRecords > 0 && st.spilledRecords < 200, "precondition: the failure hit mid-batch");
+            assertEquals(200, st.spilledRecords + st.droppedRecords - st.evictedRecords,
+                    "records written before the failure must not also be counted as dropped");
+            long maxBefore = maxSeq(dir);
+
+            assertTrue(store.spill(recs(5)), "the store keeps working after the failure");
+            assertTrue(maxSeq(dir) > maxBefore, "the next record opens a fresh segment, never appends behind a torn frame");
+            store.sealActiveSegment();
+            assertEquals(st.spilledRecords + 5 - store.stats().evictedRecords, onDisk(store));
+        }
+    }
+
+    @Test
+    void refusedRecordsAreCountedOnceByTheStore(@TempDir Path dir) throws Exception {
+        SpillStore store = new SpillStore(dir, BIG, BIG, NO_FLOOR, plenty());
+        store.close();
+        assertEquals(0, store.spillRecords(recs(4)), "a closed store writes nothing");
+        assertEquals(4, store.stats().droppedRecords, "and counts the refusal itself");
+    }
+
+    @Test
+    void totalBytesIncludesSegmentHeadersSoTheCapIsTheRealFootprint(@TempDir Path dir) throws Exception {
+        try (SpillStore store = new SpillStore(dir, 200, 1000, NO_FLOOR, plenty())) {
+            store.spill(recs(200));
+            store.sealActiveSegment();
+            assertEquals(fileBytes(dir), store.totalBytes(), "bookkeeping must match the bytes on disk");
+            assertTrue(fileBytes(dir) <= 1000, "the cap bounds the real on-disk footprint");
+        }
+    }
+
+    @Test
+    void deletingAnAlreadyMissingSegmentDoesNotDecrementTheCount(@TempDir Path dir) throws Exception {
+        try (SpillStore store = new SpillStore(dir, 200, BIG, NO_FLOOR, plenty())) {
+            store.spill(recs(20));
+            store.sealActiveSegment();
+            int before = store.stats().segmentCount;
+            Path seg = store.shippableSegments().get(0);
+            Files.delete(seg);           // gone behind the store's back
+            store.deleteSegment(seg);
+            assertEquals(before, store.stats().segmentCount, "a segment that was not deleted here is not uncounted here");
+        }
+    }
+
+    @Test
+    void evictionSkipsASegmentClaimedForReplay(@TempDir Path dir) throws Exception {
+        try (SpillStore store = new SpillStore(dir, 200, BIG, NO_FLOOR, plenty())) {
+            store.spill(recs(20));
+            store.sealActiveSegment();
+            List<Path> segs = store.shippableSegments();
+            assertTrue(segs.size() >= 3, "precondition: several segments");
+            assertTrue(store.beginReplay(segs.get(0)));
+        }
+        // Reopen with a cap that forces eviction on the next write, and claim the oldest first.
+        try (SpillStore store = new SpillStore(dir, 200, fileBytes(dir), NO_FLOOR, plenty())) {
+            List<Path> segs = store.shippableSegments();
+            assertTrue(store.beginReplay(segs.get(0)), "a worker claims the oldest segment");
+            store.spill(recs(1));
+            assertTrue(Files.exists(segs.get(0)), "a segment being replayed must never be evicted");
+            assertFalse(Files.exists(segs.get(1)), "the next-oldest is evicted instead");
+            assertFalse(store.beginReplay(segs.get(1)), "an evicted segment can no longer be claimed");
+            store.deleteSegment(segs.get(0)); // the worker finished and releases its claim
+            assertEquals(countSegments(dir), store.stats().segmentCount, "no double decrement");
         }
     }
 

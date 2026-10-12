@@ -9,13 +9,22 @@ script keeps index.html in lock-step with docs/benchmark-results.md and the char
 
     .venv-charts/bin/python docs/charts/generate_report_html.py
 
+The published 2026-10-12 run (engine 0.2.0, 12 apps, 3 vendors, spill on) is rebuilt with
+
+    BENCH_RESULTS=.claude/bench-results/publish-020 \
+    DELIVERY_JSON=.claude/bench-results/publish-020/delivery.json \
+    .venv-charts/bin/python docs/charts/generate_report_html.py
+
+DELIVERY_JSON (default: $BENCH_RESULTS/delivery.json) holds the measured log delivery,
+{round: {app: {"delivered": N, "expected": M}}}; without it the Delivered row reads "—".
+
 The emitted HTML contains NO hostnames or hardware specs — only worker-TYPE names
 ("0.1 vCore") and display app labels. The headline is Test 3 (5-min sustained, the warm
 number), consistent with benchmark-results.md; the 1-minute Test 1 carries the same
 cold-start caveat the Markdown report does.
 """
 
-import datetime
+import json
 import os
 import pathlib
 import re
@@ -23,7 +32,10 @@ import re
 DOCS = pathlib.Path(__file__).resolve().parents[1]
 REPO = DOCS.parent
 RESULTS = pathlib.Path(os.environ.get("BENCH_RESULTS", REPO / ".claude" / "bench-results"))
+DELIVERY = pathlib.Path(os.environ.get("DELIVERY_JSON", RESULTS / "delivery.json"))
 OUT = DOCS / "index.html"
+MEASURED = "2026-10-12"
+ENGINE = "0.2.0"
 
 # --- oha parsing (normalise every time field to SECONDS; handle the 1.14.0 ÷10 glitch) ---
 _UNIT = {"sec": 1.0, "ms": 1e-3, "min": 60.0, "10 sec": 10.0, "10 ms": 1e-2}
@@ -74,9 +86,24 @@ def load(label, app):
 PAIRS = [
     ("CloudHub 1.0", "0.1 vCore worker", "Datadog", "dd-ch1-batch", "dd-ch1-stock", "ch1"),
     ("CloudHub 1.0", "0.1 vCore worker", "New Relic", "nr-ch1-batch", "nr-ch1-stock", "ch1"),
+    ("CloudHub 1.0", "0.1 vCore worker", "Elasticsearch", "es-ch1-batch", "es-ch1-stock", "ch1"),
     ("CloudHub 2.0", "0.1 vCore replica", "Datadog", "dd-ch2-batch", "dd-ch2-stock", "ch2"),
     ("CloudHub 2.0", "0.1 vCore replica", "New Relic", "nr-ch2-batch", "nr-ch2-stock", "ch2"),
+    ("CloudHub 2.0", "0.1 vCore replica", "Elasticsearch", "es-ch2-batch", "es-ch2-stock", "ch2"),
 ]
+DELIVERY_DATA = json.loads(DELIVERY.read_text()) if DELIVERY.exists() else {}
+
+
+def delivered(label, app):
+    """Logs delivered ÷ logs generated, in percent, or None when not measured."""
+    rec = DELIVERY_DATA.get(label, {}).get(app)
+    if not rec or not rec.get("expected"):
+        return None
+    return rec["delivered"] / rec["expected"] * 100
+
+
+def pct(x):
+    return f"{x:.1f}%" if x is not None else "—"
 CONC = {"ch1": 10, "ch2": 5}
 HEADLINE = "z5m"  # Test 3, 5-min sustained — the warm headline number
 
@@ -94,7 +121,7 @@ def ratio(b, s):
 
 
 def pair_rows(b, s):
-    """The metric table body for one pair."""
+    """The metric table body for one pair (b/s carry a "delivered" key)."""
     def row(metric, sv, bv, imp=""):
         return (f'      <tr><td>{metric}</td><td class="stock">{sv}</td>'
                 f'<td class="batch">{bv}</td><td class="win">{imp}</td></tr>')
@@ -104,6 +131,7 @@ def pair_rows(b, s):
         row("Total requests (5 min)", f'{s["reqs"]:,}', f'{b["reqs"]:,}',
             f'{b["reqs"] / s["reqs"]:.1f}×' if s["reqs"] else "—"),
         row("Success rate", f'{s["sr"]:.2f}%', f'{b["sr"]:.2f}%', ""),
+        row("Logs delivered", pct(s["delivered"]), pct(b["delivered"]), ""),
         row("Average latency", ms(s["mean"]), ms(b["mean"]),
             f'{s["mean"] / b["mean"]:.1f}× lower' if b["mean"] else "—"),
         row("p50", ms(s["p50"]), ms(b["p50"]), ""),
@@ -126,7 +154,7 @@ def bars(b, s):
     """
     mx = max(s["p99"], b["p99"])
     out = [f'    <div class="legend"><span><i style="background:var(--stock)"></i>Stock</span>'
-           f'<span><i style="background:var(--batch)"></i>Batch 0.1.3</span>'
+           f'<span><i style="background:var(--batch)"></i>Batch {ENGINE}</span>'
            f'<span>bar length &prop; latency (max = {ms(mx)})</span></div>']
     for p in ("p50", "p90", "p99"):
         sw = s[p] / mx * 100
@@ -141,6 +169,8 @@ def bars(b, s):
 def build():
     d = {p[3]: load(HEADLINE, p[3]) for p in PAIRS}
     d.update({p[4]: load(HEADLINE, p[4]) for p in PAIRS})
+    for app in d:
+        d[app]["delivered"] = delivered(HEADLINE, app)
 
     # headline cards (one per pair)
     cards = []
@@ -150,7 +180,7 @@ def build():
         cards.append(f'''    <div class="card">
       <div class="label">{title} · {vendor}</div>
       <div class="big batch">{r:.1f}× <span style="font-size:16px;color:var(--muted)">throughput</span></div>
-      <div class="note">{rs(b["reqsec"])} vs {rs(s["reqsec"])} req/s &middot; batch vs stock (5-min run)</div>
+      <div class="note">{rs(b["reqsec"])} vs {rs(s["reqsec"])} req/s &middot; batch vs stock (5-min run) &middot; logs delivered {pct(b["delivered"])} vs {pct(s["delivered"])}</div>
     </div>''')
 
     # per-plane sections
@@ -164,23 +194,30 @@ def build():
                 f'22 events/request · 5-minute sustained run (Test 3) · '
                 f'-c {CONC[key]}</span></h2>')
             last_plane = title
-        sections.append(f'''  <h3>{vendor} intake</h3>
+        note = ""
+        if vendor == "New Relic" and b["delivered"] is not None and b["delivered"] < 99:
+            note = (f'\n  <p class="sub">Batch delivered {pct(b["delivered"])} here because its spill '
+                    'backlog was still draining to the US intake when the next round\'s restart '
+                    f'replaced the {"worker" if key == "ch1" else "pod"}; in Test 4, the last round, it '
+                    'delivered 100%. See '
+                    '"New Relic results depend on location" below.</p>')
+        sections.append(f'''  <h3>{vendor} intake</h3>{note}
   <div class="headline">
     <div class="card">
       <div class="label">Stock HttpAppender</div>
       <div class="big stock">{rs(s["reqsec"])} <span style="font-size:16px;color:var(--muted)">req/s</span></div>
-      <div class="note">avg {ms(s["mean"])} &middot; p90 {ms(s["p90"])} &middot; {s["reqs"]:,} reqs &middot; {s["sr"]:.0f}% ok</div>
+      <div class="note">avg {ms(s["mean"])} &middot; p90 {ms(s["p90"])} &middot; {s["reqs"]:,} reqs &middot; {s["sr"]:.0f}% ok &middot; {pct(s["delivered"])} delivered</div>
     </div>
     <div class="card">
-      <div class="label">Batch appender (0.1.3)</div>
+      <div class="label">Batch appender ({ENGINE})</div>
       <div class="big batch">{rs(b["reqsec"])} <span style="font-size:16px;color:var(--muted)">req/s</span></div>
-      <div class="note">avg {ms(b["mean"])} &middot; p90 {ms(b["p90"])} &middot; {b["reqs"]:,} reqs &middot; {b["sr"]:.0f}% ok</div>
+      <div class="note">avg {ms(b["mean"])} &middot; p90 {ms(b["p90"])} &middot; {b["reqs"]:,} reqs &middot; {b["sr"]:.0f}% ok &middot; {pct(b["delivered"])} delivered</div>
     </div>
   </div>
 
   <table>
     <thead>
-      <tr><th>Metric</th><th>Stock HttpAppender</th><th>Batch appender 0.1.3</th><th>Improvement</th></tr>
+      <tr><th>Metric</th><th>Stock HttpAppender</th><th>Batch appender {ENGINE}</th><th>Improvement</th></tr>
     </thead>
     <tbody>
 {pair_rows(b, s)}
@@ -196,14 +233,17 @@ def build():
     ch2 = [d[p[3]]["reqsec"] / d[p[4]]["reqsec"] for p in PAIRS if p[5] == "ch2"]
     ch1_lo, ch1_hi = min(ch1), max(ch1)
     ch2_lo, ch2_hi = min(ch2), max(ch2)
-    today = datetime.date(2026, 8, 4).isoformat()
+    # cold-start example (CH2 Datadog batch, Test 1 -> Test 3), computed
+    cold_t1 = load("z1m", "dd-ch2-batch")["reqsec"]
+    cold_t3 = d["dd-ch2-batch"]["reqsec"]
 
     return TEMPLATE.format(
         cards="\n".join(cards),
         sections="\n\n".join(sections),
-        ch1_lo=f"{ch1_lo:.0f}", ch1_hi=f"{ch1_hi:.0f}",
-        ch2_lo=f"{ch2_lo:.0f}", ch2_hi=f"{ch2_hi:.0f}",
-        measured=today,
+        ch1_lo=f"{ch1_lo:.1f}", ch1_hi=f"{ch1_hi:.1f}",
+        ch2_lo=f"{ch2_lo:.1f}", ch2_hi=f"{ch2_hi:.1f}",
+        cold_t1=f"{cold_t1:.1f}", cold_t3=f"{cold_t3:.1f}",
+        measured=MEASURED, engine=ENGINE,
     )
 
 
@@ -225,8 +265,9 @@ TEMPLATE = '''<!DOCTYPE html>
     limitations under the License.
 -->
 <!--
-    GENERATED FILE — do not hand-edit. Rebuild with:
-        .venv-charts/bin/python docs/charts/generate_report_html.py
+    GENERATED FILE — do not hand-edit. Rebuild the published 2026-10-12 run with:
+        BENCH_RESULTS=.claude/bench-results/publish-020 .venv-charts/bin/python docs/charts/generate_report_html.py
+    (without BENCH_RESULTS the script reads .claude/bench-results/, which holds older rounds)
 -->
 <html lang="en">
 <head>
@@ -311,23 +352,25 @@ TEMPLATE = '''<!DOCTYPE html>
 <div class="wrap">
 
   <h1>batch-http-appender — performance</h1>
-  <p class="sub">Stock Log4j2 <code>HttpAppender</code> vs. the batching HTTP appender (v0.1.3), measured on eight Mule apps — a batch/stock pair shipping to <b>Datadog</b> and a second pair shipping to <b>New Relic</b>, on both CloudHub&nbsp;1.0 and CloudHub&nbsp;2.0. Headline figures are the <b>5-minute sustained run (Test 3)</b>; see the cold-start caveat below for why the 1-minute run reads lower.</p>
+  <p class="sub">Stock Log4j2 <code>HttpAppender</code> vs. the batching HTTP appender (v{engine}), measured on twelve Mule apps — a batch/stock pair shipping to each of <b>Datadog</b>, <b>New Relic</b> and <b>Elasticsearch</b>, on both CloudHub&nbsp;1.0 and CloudHub&nbsp;2.0 — with the logs delivered counted at every vendor. Headline figures are the <b>5-minute sustained run (Test 3)</b>; see the cold-start caveat below for why the 1-minute run reads lower.</p>
 
   <div class="meta">
     <span class="chip"><b>Targets:</b> CloudHub 1.0 &amp; 2.0</span>
     <span class="chip"><b>Worker:</b> 0.1 vCore</span>
-    <span class="chip"><b>Vendors:</b> Datadog &amp; New Relic</span>
-    <span class="chip"><b>Load:</b> oha, 5 min, CH1 -c 10 / CH2 -c 5</span>
+    <span class="chip"><b>Vendors:</b> Datadog, New Relic &amp; Elasticsearch</span>
+    <span class="chip"><b>Load:</b> oha 1.16, 5 min, CH1 -c 10 / CH2 -c 5</span>
     <span class="chip"><b>Endpoint:</b> <code>/log?count=20</code> — 22 events/request</span>
+    <span class="chip"><b>Spill:</b> on</span>
     <span class="chip"><b>Measured:</b> {measured}</span>
-    <span class="chip"><b>appender:</b> v0.1.3</span>
+    <span class="chip"><b>appender:</b> v{engine}</span>
   </div>
 
   <div class="verdict">
     Against its own stock sibling, on the same platform, shipping to the same vendor,
     the batching appender sustained a 5-minute run at
     <b>{ch1_lo}–{ch1_hi}× the request throughput on CloudHub 1.0</b> and
-    <b>{ch2_lo}–{ch2_hi}× on CloudHub 2.0</b>. The stock appender's synchronous
+    <b>{ch2_lo}–{ch2_hi}× on CloudHub 2.0</b>, and delivered every log to Datadog and
+    Elasticsearch in every test. The stock appender's synchronous
     one-POST-per-event send holds the request thread for the whole round-trip to the intake,
     so under concurrency its single background flusher never catches up and its tail climbs
     into the multi-second — sometimes tens-of-seconds — range. The batch appender's
@@ -345,69 +388,110 @@ TEMPLATE = '''<!DOCTYPE html>
 
   <!-- ============================ Shared: methodology ============================ -->
   <h2>What was tested</h2>
-  <p>Two batch/stock pairs of functionally identical Mule 4 applications — one member of each
+  <p>Three batch/stock pairs of functionally identical Mule 4 applications — one member of each
   pair on Log4j2's stock <code>&lt;Http&gt;</code> appender, the other on this library's
-  <code>&lt;BatchHttp&gt;</code> (v0.1.3) — one pair shipping to the <b>Datadog</b> Logs intake
-  and one to the <b>New Relic</b> Logs intake, all four deployed to <b>each</b> platform (eight
-  apps total). Within a pair the apps share the same flow, the same <code>&lt;Loggers&gt;</code>
-  wiring, and the same file appender; the <b>only substantive difference is the appender
-  element</b>. Each request to <code>/log?count=20</code> emits <b>22 log events</b> — a
+  <code>&lt;BatchHttp&gt;</code> (v{engine}) — one pair shipping to the <b>Datadog</b> Logs intake
+  (site <code>ap2</code>, Sydney), one to the <b>New Relic</b> Logs intake (US,
+  <code>log-api.newrelic.com</code>) and one to <b>Elasticsearch</b> (Elastic Cloud Serverless,
+  Sydney), all six deployed to <b>each</b> platform (twelve apps total). Within a pair the apps
+  share the same flow, the same <code>&lt;Loggers&gt;</code> wiring, and the same file appender;
+  the <b>only substantive difference is the appender element</b>. The batch apps run
+  <code>maxBatchRecords=200</code>, one flusher, <code>gzip="false"</code> and <b>disk spill
+  on</b>. Each request to <code>/log?count=20</code> emits <b>22 log events</b> — a
   <code>batch.start</code>, 20 <code>order.processed</code>, and a <code>batch.completed</code>.</p>
-  <p>Load was generated with <a href="https://github.com/hatoo/oha"><code>oha</code></a>
-  over a <b>5-minute</b> window (Test 3). <b>Concurrency differs by plane — CloudHub 1.0 at
-  <code>-c 10</code>, CloudHub 2.0 at <code>-c 5</code></b> — because the CloudHub 2.0 replica is
-  a capped-CPU, no-swap worker held at lower concurrency to stay off its OOM ceiling. Because
-  <code>-c</code> differs, <b>compare only within a plane (batch vs stock), never CloudHub 1.0
-  against CloudHub 2.0</b>. Each app was restarted and warmed before every run. Measured
-  {measured}.</p>
-  <p>Each run independently corroborates the load parameters: requests/sec × mean latency ≈ the
-  plane's concurrency (Little's Law) holds across all eight. Latency figures from
-  <code>oha</code> 1.14.0 may carry a ×10 unit-selection display glitch; every figure here is
-  normalised. The correction touches latency only, not request counts or requests/sec.</p>
+  <p>Load was generated with <a href="https://github.com/hatoo/oha"><code>oha</code></a> 1.16
+  (<code>-w</code>) over a <b>5-minute</b> window (Test 3). <b>Concurrency differs by plane —
+  CloudHub 1.0 at <code>-c 10</code> over <code>http</code>, CloudHub 2.0 at <code>-c 5</code> over
+  <code>https</code></b> — because the CloudHub 2.0 replica is a capped-CPU, no-swap worker held at
+  lower concurrency to stay off its OOM ceiling. Because <code>-c</code> differs, <b>compare only
+  within a plane (batch vs stock), never CloudHub 1.0 against CloudHub 2.0</b>. Every worker and
+  replica runs in Sydney (<code>ap-southeast-2</code>).</p>
+  <p>The three vendors ran as <b>parallel lanes</b>, since each has its own intake, with <b>one app
+  per vendor at a time</b>: CH1 batch, CH1 stock, CH2 batch, CH2 stock, with a barrier after each
+  step. As a control, against a sequential, Elasticsearch-only run of 2026-10-11, Elasticsearch
+  stock req/s in the parallel lanes was within 3% on CloudHub 2.0 in the 5-minute rounds. On
+  CloudHub 1.0 it was −3.3% in Test 4 and −14.6% in Test 3; an earlier parallel round of the same
+  stock apps read +2.9% and −7.1% there, so a single CloudHub 1.0 stock run moves that much on its
+  own. <b>Every test starts on a freshly restarted app</b> (restarts are pipelined ahead of each
+  app's turn), followed by 5 light warmups and a 30 s drain. The exception is the churn window,
+  which follows Test 1 with no restart. Measured {measured}.</p>
+  <p><b>Logs delivered</b> is the logs that reached the vendor divided by the logs the measured
+  requests generated (HTTP 200 responses × 22). Elasticsearch is counted by event time inside
+  the <code>oha</code> window. Datadog and New Relic are counted by arrival time, from the test's
+  start to the next test on the same app: the demos omit the vendors' reserved event-time
+  attribute on purpose, so the vendor stamps arrival. A value over 100% is late backlog from an
+  earlier test arriving in the window, or log lines of requests <code>oha</code> cut off.</p>
+  <p>Each 5-minute run shown here independently corroborates the load parameters: requests/sec ×
+  mean latency ≈ the plane's concurrency (Little's Law) holds within 8% across all twelve. It does
+  not hold for every run in the full report: where requests fail or time out (Test 4, New Relic
+  on CloudHub 1.0 in the churn window) or a long stock tail drains past the deadline (the
+  1-minute tests), the product falls below <code>-c</code>. The parsers still normalise the
+  <code>oha</code> 1.14.0 ×10 unit-selection display glitch, which this run's 1.16 output does
+  not show.</p>
 
   <div class="disclaim warn">
     <b>⚠ Cold-start caveat — the 1-minute Test 1 reads lower than this page's headline.</b> The
     <b>batch</b> appender is CPU/JIT-bound and warmup-sensitive; the warmup before each run is
     deliberately light so it does not pre-load the <em>stock</em> flusher's backlog. The
     trade-off is that the batch JVM is still under-warmed when a 1-minute window opens, so a
-    short Test 1 under-reports batch throughput (e.g. CloudHub 2.0 Datadog batch rises 13.8 → 43.5
+    short Test 1 under-reports batch throughput (e.g. CloudHub 2.0 Datadog batch rises {cold_t1} → {cold_t3}
     req/s from the 1-minute run to this 5-minute one as the fixed cold-start cost amortises). The
     5-minute Test 3 shown here is the better read of sustained warm throughput. The full
     Markdown report (<code>docs/benchmark-results.md</code>) carries Test 1, the in-thread churn
-    window, Test 3, and the 30s-cap Test 4 side by side.
+    window, Test 3, and the 30s-cap Test 4 side by side, with logs delivered for each.
   </div>
 
   <div class="disclaim warn">
     <b>Caveats — read the numbers as directional, not absolute.</b>
     <ul style="margin:8px 0 0; padding-left:20px;">
-      <li><b>One run per pair, no median.</b> These are single measurements, not repeated ones.
+      <li><b>One run per app, no median.</b> These are single measurements, not repeated ones.
       The pattern is directional, not established.</li>
       <li><b>Concurrency differs by plane</b> (CH1 -c 10, CH2 -c 5), so the two platform
       sections are not a controlled comparison of each other. Each table stands as a
-      batch-vs-stock contrast within its own vendor and platform. (The next benchmark round
-      plans to even concurrency across planes.)</li>
-      <li><b><code>gzip</code> and <code>spillEnabled</code> were disabled in these demos</b>,
-      so this measures <b>batching in isolation</b> rather than the appender as it would be
-      deployed. Compression is off precisely because the stock <code>&lt;Http&gt;</code>
-      appender cannot compress and leaving it on would vary two things at once; a production
-      deployment should leave both on.</li>
+      batch-vs-stock contrast within its own vendor and platform.</li>
+      <li><b>Spill is on and <code>gzip</code> is off.</b> Spill costs batch req/s where the
+      queue overflows the whole time (New Relic on CloudHub 1.0 in the churn window: 42 req/s)
+      but not in the 5-minute tests. Compression is off because the stock
+      <code>&lt;Http&gt;</code> appender cannot compress, and leaving it on would vary two things
+      at once; a production deployment should leave it on.</li>
       <li><b>Throughput and mean latency are one measurement, not two.</b> The load is
       closed-loop (<code>oha</code> with no rate limit), so requests/sec is the arithmetic
       consequence of mean latency, not an independent win. The percentiles are unaffected.</li>
+      <li><b>New Relic results depend on location.</b> The workers run in Sydney
+      (<code>ap-southeast-2</code>), next to Datadog's <code>ap2</code> site and the
+      Elasticsearch project. New Relic offers only US and EU regions; these apps ship to the US
+      endpoint (<code>log-api.newrelic.com</code>), so every batch crosses the Pacific and the
+      backlog drains at about 330 logs/s. Requests/sec measures how responsive the app stays, not
+      how many logs arrive. New Relic batch delivered about 96–107% in Test 1 and churn, 44.5%
+      (CloudHub 1.0) and 77.3% (CloudHub 2.0) in Test 3, and 100% in Test 4. The Test 3 shortfall
+      is a restart, not a drop: the 5-minute burst spilled to disk faster than the US intake took
+      it, and the backlog was still draining when the next round's restart replaced the worker
+      (CloudHub 1.0 restarts onto a new worker, 2.0 onto a new pod), so <code>/tmp</code> and the
+      spill files went with it. Test 4 was the last round; nothing restarted after it, and its
+      backlog drained in about 12 minutes. Workers closer to the New Relic region, or
+      <code>gzip</code> plus more <code>flusherThreads</code>, ship faster.</li>
+      <li><b>Stock loses its backlog at every restart.</b> Stock delivered 14–83% of its logs in
+      Test 1 and Test 3: what is still queued in memory when the next restart comes is gone.</li>
+      <li><b>Correction to the 2026-08-04 run.</b> Its CloudHub 2.0 Datadog stock app carried a
+      leftover <code>AsyncLoggerConfig.RingBufferSize=20000</code> and <code>log4j2.debug=true</code>
+      that no other app had. It measured 5.75 req/s with them against 1.46 without, so the
+      published 7.6× is not comparable; a re-test without them gave about 31×. This run's app has
+      neither property.</li>
     </ul>
   </div>
 
   <footer>
     Measured {measured} on CloudHub 1.0 (0.1 vCore worker) and CloudHub 2.0 (0.1 vCore replica),
-    two vendor pairs — Datadog and New Relic — with <code>oha</code> over a 5-minute window
-    (CloudHub 1.0 at -c 10, CloudHub 2.0 at -c 5, <code>/log?count=20</code> for 22 events per
-    request), each app restarted and warmed before the run. Endpoint URLs omitted intentionally.
+    three vendor pairs — Datadog, New Relic and Elasticsearch — with <code>oha</code> over a
+    5-minute window (CloudHub 1.0 at -c 10, CloudHub 2.0 at -c 5, <code>/log?count=20</code> for
+    22 events per request), each app restarted and warmed before the run, three vendor lanes in
+    parallel with one app per vendor at a time. Endpoint URLs omitted intentionally.
     Numbers are single-run and will vary with worker load, vendor rate limits, and intake
     responsiveness; the two planes run at different concurrency and have different CPU models, so
-    their tables are not comparable with each other — see the caveats above. Latency figures may
-    carry a ×10 normalisation for an <code>oha</code> 1.14.0 unit-selection glitch. This is a
-    GENERATED file — rebuild with <code>docs/charts/generate_report_html.py</code>. Generated for
-    batch-http-appender v0.1.3.
+    their tables are not comparable with each other — see the caveats above. This is a
+    GENERATED file — rebuild with <code>BENCH_RESULTS=.claude/bench-results/publish-020
+    docs/charts/generate_report_html.py</code>. Generated for
+    batch-http-appender v{engine}.
   </footer>
 
 </div>

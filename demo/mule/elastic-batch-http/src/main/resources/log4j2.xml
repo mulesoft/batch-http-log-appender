@@ -104,7 +104,7 @@
                    includeStackTrace="true"
                    diagnosticsLevel="INFO"
                    statsIntervalMillis="60000"
-                   spillEnabled="false"
+                   spillEnabled="${sys:batch.spillEnabled:-true}"
                    spillInstanceId="elastic-batch-http"
                    spillReplayIntervalMillis="10000"
                    maxSpillFileBytes="16777216"
@@ -125,17 +125,23 @@
                                       leaving gzip on would vary two things at once — batching
                                       AND compression. A real deployment should leave
                                       compression on (simply omit the attribute). -->
-            <!-- Disk spill above — a DELIBERATE divergence from the library default:
-                   spillEnabled       the library defaults this to TRUE, which is the right
-                                      production setting; this app overrides it to FALSE on
-                                      purpose. The spill buffer's replay threads and disk I/O
-                                      compete for the same fractional vCore that serves
-                                      requests, so leaving spill on would make this A/B measure
-                                      batching PLUS durability machinery. A real deployment
-                                      should leave it on (simply omit the attribute).
-                                      CONSEQUENCE, overflow reverts to dropping: spillOnOverflow
-                                      only takes effect when spill is enabled, so for THIS app
-                                      the overload signal is `dropped` in the stats heartbeat. -->
+            <!-- Disk spill above — ON, the library default:
+                   spillEnabled       ${sys:batch.spillEnabled:-true}. Queue overflow and batches
+                                      that fail every retry go to disk and replay when the intake
+                                      catches up. The segments live in the JVM temp dir (/tmp), so
+                                      a backlog survives only a restart on the same host: on
+                                      CloudHub a restart onto a new worker (1.0) or pod (2.0)
+                                      loses it. Spill's replay threads and disk I/O share the
+                                      0.1 vCore with request handling: in the 2026-10-12 benchmark
+                                      that cost req/s only where the queue overflowed the whole
+                                      time (New Relic on CloudHub 1.0 in the churn test), and
+                                      nothing measurable in the 5-minute tests. Set the property
+                                      batch.spillEnabled=false to measure batching alone (overflow
+                                      then reverts to dropping per overflowPolicy, and the overload
+                                      signal becomes `dropped`). With spill on the overload signal
+                                      is `spilledRecords` in the stats heartbeat; records the full
+                                      spill buffer refuses or evicts are counted in
+                                      spillStats().droppedRecords, not in `dropped`. -->
             <!-- Queue sizing above:
                    queueCapacity      25000 (about 50 MB at ~2 KB retained per record) — tens of
                                       seconds of buffer at the rates this app sustains. With
@@ -146,8 +152,8 @@
                                        INFO = failures plus the periodic stats heartbeat.
                    statsIntervalMillis a one-line delivery snapshot every 60 s
                                        (accepted/sent/dropped/failed/queueDepth). -->
-            <!-- Crash-resilience knobs above — every one of them INERT while spillEnabled is
-                 false. Kept so re-enabling durability is a one-word edit; see the Datadog demo's
+            <!-- Crash-resilience knobs above — active while spill is on; every one of them
+                 is inert when batch.spillEnabled=false. Kept so re-enabling durability is a one-word edit; see the Datadog demo's
                  log4j2.xml for what each one does. -->
             <!-- Timestamp: Elasticsearch data streams REQUIRE @timestamp, so this sink always
                  sends the event time and ignores includeTimestamp. The stock sibling's layout

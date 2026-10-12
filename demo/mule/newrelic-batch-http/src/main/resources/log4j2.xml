@@ -130,7 +130,7 @@
                    includeTimestamp="false"
                    diagnosticsLevel="INFO"
                    statsIntervalMillis="60000"
-                   spillEnabled="false"
+                   spillEnabled="${sys:batch.spillEnabled:-true}"
                    spillInstanceId="newrelic-batch-http"
                    spillReplayIntervalMillis="10000"
                    maxSpillFileBytes="16777216"
@@ -156,24 +156,23 @@
                                       body AS SENT, so gzip buys real headroom there. The
                                       engine's own maxBatchBytes ceiling is uncompressed
                                       either way. -->
-            <!-- Disk spill above — a DELIBERATE divergence from the library default:
-                   spillEnabled       the library defaults this to TRUE, which is the right
-                                      production setting; this app overrides it to FALSE on
-                                      purpose. The spill buffer runs a replay driver thread that
-                                      polls on an interval, adds up to spillReplayThreads
-                                      transient workers during a replay pass, and does disk I/O
-                                      on the failure and overflow paths. On a 0.1 vCore worker —
-                                      more so on a CloudHub 2.0 replica capped near 0.28-0.4
-                                      vCPU — those compete for the same core that serves
-                                      requests, so leaving spill on would make this A/B measure
-                                      batching PLUS durability machinery. A real deployment
-                                      should leave it on (simply omit the attribute).
-                                      CONSEQUENCE, overflow reverts to dropping: spillOnOverflow
-                                      only takes effect when spill is enabled, so a record the
-                                      queue cannot accept is now discarded per overflowPolicy
-                                      (DROP_NEWEST). For THIS app the overload signal is
-                                      therefore `dropped` in the stats heartbeat; under the
-                                      library default it would be `spilledRecords` instead. -->
+            <!-- Disk spill above — ON, the library default:
+                   spillEnabled       ${sys:batch.spillEnabled:-true}. Queue overflow and batches
+                                      that fail every retry go to disk and replay when the intake
+                                      catches up. The segments live in the JVM temp dir (/tmp), so
+                                      a backlog survives only a restart on the same host: on
+                                      CloudHub a restart onto a new worker (1.0) or pod (2.0)
+                                      loses it. Spill's replay threads and disk I/O share the
+                                      0.1 vCore with request handling: in the 2026-10-12 benchmark
+                                      that cost req/s only where the queue overflowed the whole
+                                      time (New Relic on CloudHub 1.0 in the churn test), and
+                                      nothing measurable in the 5-minute tests. Set the property
+                                      batch.spillEnabled=false to measure batching alone (overflow
+                                      then reverts to dropping per overflowPolicy, and the overload
+                                      signal becomes `dropped`). With spill on the overload signal
+                                      is `spilledRecords` in the stats heartbeat; records the full
+                                      spill buffer refuses or evicts are counted in
+                                      spillStats().droppedRecords, not in `dropped`. -->
             <!-- Queue sizing above:
                    queueCapacity      25000, down from 100000. At roughly 2 KB retained per
                                       record, 100000 was on the order of 200 MB of heap — a lot
@@ -191,8 +190,8 @@
                                        (accepted/sent/dropped/failed/queueDepth + spill totals);
                                        0 disables. 60000 here = a once-a-minute heartbeat so
                                        "is it still shipping?" is a log read, not a guess. -->
-            <!-- Crash-resilience knobs above — every one of them INERT while spillEnabled is
-                 false. Kept, not deleted: this file is exhaustive by design, these lines are
+            <!-- Crash-resilience knobs above — active while spill is on; every one of them
+                 is inert when batch.spillEnabled=false. Kept, not deleted: this file is exhaustive by design, these lines are
                  where the library's spill surface is documented, and the sizing below was chosen
                  for a fractional-vCore worker. Keeping them makes re-enabling durability a
                  one-word edit instead of a rediscovery.
