@@ -159,16 +159,20 @@
             <!-- Disk spill above — ON, the library default:
                    spillEnabled       ${sys:batch.spillEnabled:-true}. Queue overflow and batches
                                       that fail every retry go to disk and replay when the intake
-                                      catches up, so a burst is delivered late, not dropped.
-                                      Spill's replay threads and disk I/O share the 0.1 vCore with
-                                      request handling: in the benchmark that cost ~25-30% req/s in
-                                      the cold 1-minute and churn tests and nothing measurable in
-                                      the 5-minute test. Set the property batch.spillEnabled=false
-                                      to measure batching alone (overflow then reverts to dropping
-                                      per overflowPolicy, and the overload signal becomes `dropped`).
-                                      With spill on the overload signal is `spilledRecords` in the
-                                      stats heartbeat; `dropped`/`droppedRecords` move only when the
-                                      spill buffer itself is full. -->
+                                      catches up. The segments live in the JVM temp dir (/tmp), so
+                                      a backlog survives only a restart on the same host: on
+                                      CloudHub a restart onto a new worker (1.0) or pod (2.0)
+                                      loses it. Spill's replay threads and disk I/O share the
+                                      0.1 vCore with request handling: in the 2026-10-12 benchmark
+                                      that cost req/s only where the queue overflowed the whole
+                                      time (New Relic on CloudHub 1.0 in the churn test), and
+                                      nothing measurable in the 5-minute tests. Set the property
+                                      batch.spillEnabled=false to measure batching alone (overflow
+                                      then reverts to dropping per overflowPolicy, and the overload
+                                      signal becomes `dropped`). With spill on the overload signal
+                                      is `spilledRecords` in the stats heartbeat; records the full
+                                      spill buffer refuses or evicts are counted in
+                                      spillStats().droppedRecords, not in `dropped`. -->
             <!-- Queue sizing above:
                    queueCapacity      25000, down from 100000. At roughly 2 KB retained per
                                       record, 100000 was on the order of 200 MB of heap — a lot

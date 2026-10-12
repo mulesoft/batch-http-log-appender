@@ -28,93 +28,121 @@ mvn install -DskipTests
 cd demo/java/benchmark && mvn exec:java
 ```
 
-### Measured on CloudHub (real Datadog and New Relic intake)
+### Measured on CloudHub (real Datadog, New Relic and Elasticsearch intake)
 
-Two batch/stock pairs — one shipping to **Datadog**, one to **New Relic** — were deployed to
-**both CloudHub 1.0 and CloudHub 2.0** (0.1 vCore each) and load-tested with
-[`oha`](https://github.com/hatoo/oha) over a **5-minute** sustained run. Each request hits
-`/log?count=20`, emitting **22 log events** (a `batch.start`, 20 `order.processed`, a
-`batch.completed`). Each app was restarted and warmed before the run. **Concurrency differs by
-plane — CloudHub 1.0 at `-c 10`, CloudHub 2.0 at `-c 5`** — because the CloudHub 2.0 replica is
-a capped-CPU, no-swap worker held at lower concurrency to stay off its OOM ceiling; **so
-compare only within a plane, never CloudHub 1.0 against CloudHub 2.0.** Every run finished at
-**100% success**. Measured 2026-08-04. **Full report (charts, percentiles, all four tests):**
+Three batch/stock pairs — one shipping to **Datadog** (site `ap2`, Sydney), one to **New Relic**
+(US intake), one to **Elasticsearch** (Elastic Cloud Serverless, Sydney) — were deployed to
+**both CloudHub 1.0 and CloudHub 2.0** (0.1 vCore each, all in Sydney), twelve apps in all, and
+load-tested with [`oha`](https://github.com/hatoo/oha) over a **5-minute** sustained run. Each
+request hits `/log?count=20`, emitting **22 log events** (a `batch.start`, 20 `order.processed`,
+a `batch.completed`). The batch apps run engine 0.2.0 with `maxBatchRecords=200`, one flusher,
+`gzip="false"` and **disk spill on**. The three vendors ran as parallel lanes with one app per
+vendor at a time, and every test started on a freshly restarted, lightly warmed app (except the
+churn window, which follows Test 1 with no restart). **Logs delivered** were counted at each
+vendor. **Concurrency differs by plane — CloudHub 1.0 at
+`-c 10`, CloudHub 2.0 at `-c 5`** — because the CloudHub 2.0 replica is a capped-CPU, no-swap
+worker held at lower concurrency to stay off its OOM ceiling; **so compare only within a plane,
+never CloudHub 1.0 against CloudHub 2.0.** Every run in the tables below finished at **100%
+success**.
+Measured 2026-10-12. **Full report (charts, percentiles, logs delivered, all four tests):**
 [`docs/benchmark-results.md`](docs/benchmark-results.md) (rendered natively on GitHub); the
 styled standalone view is [`docs/index.html`](docs/index.html) (open it locally after cloning).
 
 **Throughput gain, batch versus stock, within each vendor-and-platform pair (5-minute run):**
 
-| Platform | Datadog | New Relic |
-|----------|--------:|----------:|
-| CloudHub 1.0 — 0.1 vCore worker (`-c 10`) | **55.5×** | **133.8×** |
-| CloudHub 2.0 — 0.1 vCore replica (`-c 5`) | **7.6×** | **55.9×** |
+| Platform | Datadog | New Relic | Elasticsearch |
+|----------|--------:|----------:|--------------:|
+| CloudHub 1.0 — 0.1 vCore worker (`-c 10`) | **53.5×** | **110.8×** | **139.5×** |
+| CloudHub 2.0 — 0.1 vCore replica (`-c 5`) | **28.5×** | **59.5×** | **48.6×** |
 
 The stock `<Http>` appender ships one synchronous POST per event on a single background
 flusher; under sustained concurrency that flusher never catches up, so its throughput
 collapses and its tail latency climbs into the multi-second — sometimes tens-of-seconds —
 range. The batch appender coalesces events and enqueues non-blocking, so request latency stays
-decoupled from intake latency.
+decoupled from intake latency. The batch apps delivered **100%** of their logs to Datadog and
+Elasticsearch in every test; the stock apps delivered 14–83% in Test 1 and Test 3, because
+whatever is still queued in memory when the next restart comes is lost. New Relic batch reads
+lower in this 5-minute test for a reason covered in the caveats below.
 
 **CloudHub 1.0** — 0.1 vCore worker, `-c 10`, 5-minute run:
 
-| App | req/s | Requests | Mean | p50 | p90 | p99 |
-|-----|------:|---------:|-----:|----:|----:|----:|
-| **Datadog — batch 0.1.3** | **151.12** | **45,343** | **66 ms** | **52 ms** | **96 ms** | **304 ms** |
-| Datadog — stock `<Http>` | 2.72 | 840 | 3,630 ms | 323 ms | 11,504 ms | 14,857 ms |
-| **New Relic — batch 0.1.3** | **160.60** | **48,190** | **62 ms** | **52 ms** | **88 ms** | **238 ms** |
-| New Relic — stock `<Http>` | 1.20 | 421 | 7,725 ms | 386 ms | 22,649 ms | 55,227 ms |
+| App | req/s | Requests | Mean | p50 | p90 | p99 | Delivered |
+|-----|------:|---------:|-----:|----:|----:|----:|----------:|
+| **Datadog — batch 0.2.0** | **140.24** | **42,080** | **71 ms** | **51 ms** | **128 ms** | **226 ms** | **100.0%** |
+| Datadog — stock `<Http>` | 2.62 | 811 | 3,771 ms | 311 ms | 11,025 ms | 13,172 ms | 57.1% |
+| **New Relic — batch 0.2.0** | **133.72** | **40,121** | **75 ms** | **53 ms** | **129 ms** | **322 ms** | **44.5%** |
+| New Relic — stock `<Http>` | 1.21 | 412 | 7,882 ms | 326 ms | 33,261 ms | 58,127 ms | 35.6% |
+| **Elasticsearch — batch 0.2.0** | **136.15** | **40,852** | **73 ms** | **54 ms** | **128 ms** | **270 ms** | **100.0%** |
+| Elasticsearch — stock `<Http>` | 0.98 | 353 | 9,432 ms | 348 ms | 39,738 ms | 66,552 ms | 36.1% |
 
 **CloudHub 2.0** — 0.1 vCore replica, `-c 5`, 5-minute run:
 
-| App | req/s | Requests | Mean | p50 | p90 | p99 |
-|-----|------:|---------:|-----:|----:|----:|----:|
-| **Datadog — batch 0.1.3** | **43.53** | **13,060** | **115 ms** | **96 ms** | **200 ms** | **503 ms** |
-| Datadog — stock `<Http>` | 5.75 | 1,741 | 867 ms | 211 ms | 4,738 ms | 7,367 ms |
-| **New Relic — batch 0.1.3** | **42.57** | **12,774** | **117 ms** | **96 ms** | **202 ms** | **513 ms** |
-| New Relic — stock `<Http>` | 0.76 | 248 | 6,400 ms | 481 ms | 23,037 ms | 34,612 ms |
+| App | req/s | Requests | Mean | p50 | p90 | p99 | Delivered |
+|-----|------:|---------:|-----:|----:|----:|----:|----------:|
+| **Datadog — batch 0.2.0** | **42.03** | **12,610** | **119 ms** | **98 ms** | **203 ms** | **498 ms** | **100.0%** |
+| Datadog — stock `<Http>` | 1.48 | 447 | 3,373 ms | 4,979 ms | 5,744 ms | 8,215 ms | 83.0% |
+| **New Relic — batch 0.2.0** | **45.09** | **13,529** | **111 ms** | **95 ms** | **196 ms** | **476 ms** | **77.3%** |
+| New Relic — stock `<Http>` | 0.76 | 248 | 6,285 ms | 399 ms | 23,575 ms | 35,185 ms | 37.6% |
+| **Elasticsearch — batch 0.2.0** | **35.68** | **10,708** | **140 ms** | **107 ms** | **249 ms** | **663 ms** | **100.0%** |
+| Elasticsearch — stock `<Http>` | 0.73 | 241 | 6,487 ms | 650 ms | 26,504 ms | 39,651 ms | 32.9% |
 
 Each pair is a batch-versus-stock contrast within one vendor on one platform; the two tables
 are not a controlled comparison of each other (different concurrency, different CPU models —
-see the caveats below). Across all four stock runs the p99 tail lands between **7 s and 55 s**,
-against batch p99s of 238 ms to 513 ms.
+see the caveats below). Across all six stock runs the p99 tail lands between **8 s and 67 s**,
+against batch p99s of 226 ms to 663 ms. `Delivered` is the logs that reached the vendor ÷ the
+logs the measured requests generated (HTTP 200 responses × 22): Elasticsearch counted by event
+time inside the load window, Datadog and New Relic by arrival time, from the test's start to the
+next test on the same app.
 
-Every run validates against Little's Law — requests/sec × mean latency ≈ the plane's
-concurrency — so the load parameters are corroborated by the results rather than merely
-asserted. Latency figures from [`oha` 1.14.0](https://github.com/hatoo/oha) may carry a ×10
-unit-selection display glitch, which prints a `0.0774 10 sec`-style value where it means
-`0.774 sec`; the figures above are already normalised (the correction touches latency only,
-not request counts or requests/sec).
+Every 5-minute run in the tables above validates against Little's Law — requests/sec × mean
+latency is within 8% of the plane's concurrency — so the load parameters are corroborated by the
+results rather than merely asserted. That does not hold for every run in the full report: where
+requests fail or time out (Test 4, New Relic on CloudHub 1.0 in the churn window) or a long stock
+tail drains past the deadline (the 1-minute tests), the product falls below `-c`. Latency figures are from [`oha`](https://github.com/hatoo/oha) 1.16, whose output
+shows none of the ×10 unit-selection display glitch of 1.14.0 that the earlier runs had to
+normalise.
 
 **Read all of this as directional.** Every caveat below ships with the figures:
 
-- **One run per pair, no median.** These are single measurements, not repeated ones. The
+- **One run per app, no median.** These are single measurements, not repeated ones. The
   pattern is directional, not established.
 - **⚠ Cold-start caveat.** The batch appender is CPU/JIT-bound and warmup-sensitive, so a
   **1-minute** run under-reports its warm throughput (e.g. CloudHub 2.0 Datadog batch rises
-  **13.8 → 43.5 req/s** from a 1-minute run to the 5-minute run above as the fixed cold-start
+  **14.4 → 42.0 req/s** from a 1-minute run to the 5-minute run above as the fixed cold-start
   cost amortises). The 5-minute figures above are the better read of sustained warm throughput;
   the full report shows the 1-minute Test 1, the in-thread churn window, this 5-minute Test 3,
   and a 30s-cap Test 4 side by side.
 - **Concurrency differs by plane** (CH1 `-c 10`, CH2 `-c 5`), so the two tables are not a
-  controlled comparison of each other. The next benchmark round plans to even concurrency
-  across planes.
-- **`gzip` and `spillEnabled` were disabled in the demos**, so this measures batching in
-  isolation rather than the appender as it would be deployed. Compression is off precisely
-  because the stock `<Http>` appender cannot compress and leaving it on would vary two things
-  at once; a production deployment should leave both on.
+  controlled comparison of each other.
+- **Three vendor lanes ran in parallel**, one app per vendor at a time, each against its own
+  intake. As a control, against a sequential, Elasticsearch-only run of 2026-10-11,
+  Elasticsearch stock req/s in the parallel lanes was within 3% on CloudHub 2.0 in the 5-minute
+  rounds. On CloudHub 1.0 it was −3.3% in Test 4 and −14.6% in Test 3; an earlier parallel round
+  of the same stock apps read +2.9% and −7.1% there, so a single CloudHub 1.0 stock run moves
+  that much on its own.
+- **Spill is on and `gzip` is off.** Spill costs batch req/s where the queue overflows the
+  whole time (New Relic on CloudHub 1.0 in the churn window: 42 req/s) but not in the 5-minute
+  tests. Compression is off because the stock `<Http>` appender cannot compress, and leaving it
+  on would vary two things at once; a production deployment should leave it on.
 - **Throughput and mean latency are one measurement, not two.** The load is closed-loop
   (`oha` with no rate limit), so requests per second is the arithmetic consequence of mean
   latency, not an independent win. The percentiles are unaffected.
-- **New Relic results depend on location.** The apps run in Sydney (`ap-southeast-2`), and
-  Datadog's `ap2` site is in the same region. New Relic offers only US and EU regions; these
-  apps ship to the US endpoint (`log-api.newrelic.com`), so every request crosses the Pacific,
-  which limits how fast the appender can deliver. Requests per second measures how responsive
-  the app stays, not how many logs arrive. A later delivery-checked run (2026-10-12, engine
-  0.2.0) found that with this demo configuration (spill off) New Relic batch delivered only
-  about 10–33% of the logs at sustained load, while Datadog delivered 100%. With spill on,
-  every log arrived, but a 5-minute burst took about 12 minutes to drain, and a backlog still
-  on disk is lost if the worker is replaced first. Workers closer to the New Relic region, or
-  `gzip` plus more `flusherThreads`, ship faster.
+- **New Relic results depend on location.** The apps run in Sydney (`ap-southeast-2`), next to
+  Datadog's `ap2` site and the Elasticsearch project. New Relic offers only US and EU regions;
+  these apps ship to the US endpoint (`log-api.newrelic.com`), so every batch crosses the
+  Pacific and the backlog drains at about 330 logs/s. Requests per second measures how
+  responsive the app stays, not how many logs arrive. New Relic batch delivered about 96–107%
+  in Test 1 and churn, **44.5% (CloudHub 1.0) and 77.3% (CloudHub 2.0) in the 5-minute Test 3
+  above**, and 100% in Test 4. The Test 3 shortfall is a restart, not a drop: the 5-minute
+  burst spilled to disk faster than the US intake took it, and the backlog was still draining
+  when the next round's restart replaced the worker (CloudHub 1.0 restarts onto a new worker,
+  2.0 onto a new pod), so `/tmp` and the spill files went with it. Test 4 was the last round;
+  nothing restarted after it, and its backlog drained in about 12 minutes. Workers closer to
+  the New Relic region, or `gzip` plus more `flusherThreads`, ship faster.
+- **Correction to the 2026-08-04 run.** Its CloudHub 2.0 Datadog stock app carried a leftover
+  `AsyncLoggerConfig.RingBufferSize=20000` and `log4j2.debug=true` that no other app had. It
+  measured 5.75 req/s with them against 1.46 without, so the published 7.6× is not comparable;
+  a re-test without them gave about 31×. This run's app has neither property.
 
 ### Ingest lag: generation → arrival in Datadog
 
@@ -312,18 +340,11 @@ side-by-side (ports 8081 vs 8082) against a local mock intake and compare reques
 and wall-clock to quantify the batching speedup. See that module's README for the
 step-by-step measurement guide and a ready-to-run mock.
 
-Note that **both batch demo apps deliberately override three library defaults**, in each case
+Note that **the batch demo apps deliberately override two library defaults**, in each case
 to keep the A/B varying only the appender:
 
 - **`gzip="false"`** (library default `true`). The stock `<Http>` appender has no compression
   option, so leaving gzip on would make the pair differ by batching *and* compression.
-- **`spillEnabled="false"`** (library default `true`). The disk-spill buffer runs a replay
-  driver thread, adds transient replay workers, and does disk I/O on the failure and overflow
-  paths — real competitors for a 0.1 vCore worker or a CPU-capped CloudHub 2.0 replica, and
-  machinery the stock appender has no equivalent of. With it off, the batch demos also revert
-  to dropping on queue overflow, so **`dropped` is their overload signal, not
-  `spilledRecords`** — the reverse of the library default described under "Disk-spill buffer"
-  below. Every other `spill*` attribute stays in those files but is inert.
 - **`includeTimestamp="false"`** (library default `true`). This one is not about the stock
   appender's capabilities but about what stays observable: with the vendor's reserved
   event-time field omitted, the vendor stamps each record with its own *arrival* time, so
@@ -331,10 +352,18 @@ to keep the A/B varying only the appender:
   the generation time, hiding shipping delay by construction. The stock siblings omit it the
   same way — their layouts carry no such key — so both halves are measured identically.
 
-The first two are the right production settings — a real deployment should leave compression
-and spill on — so treat them as separate measurements rather than properties of these demos.
-The third is a measurement decision either way: a production app usually *wants* its own
-event time.
+The first is the right production setting to change back — a real deployment should leave
+compression on. The second is a measurement decision either way: a production app usually
+*wants* its own event time.
+
+**Disk spill is on**, the library default: the batch demos ship
+`spillEnabled="${sys:batch.spillEnabled:-true}"`, so queue overflow and batches that fail every
+retry go to disk and replay when the intake catches up, and `spilledRecords` is the overload
+signal. Set the system property `batch.spillEnabled=false` to measure batching alone; overflow
+then drops per `overflowPolicy` and `dropped` becomes the signal. The spill buffer's replay
+threads and disk I/O share a 0.1 vCore worker or a CPU-capped CloudHub 2.0 replica with request
+handling; in the 2026-10-12 benchmark that cost batch req/s only where the queue overflowed the
+whole time.
 
 #### Datadog flavor of the same pair
 
@@ -1080,7 +1109,9 @@ an OOM kill, a worker crash under load):
   `${java.io.tmpdir}` survives a Mule runtime/JVM restart on the same host or VM: on-prem, a
   VM, or a CloudHub 1.0 worker restarted in place. It does **not** survive these, because they
   start with an empty `/tmp`:
-  - a **CloudHub 1.0** worker replaced by a new worker;
+  - a **CloudHub 1.0** worker replaced by a new worker — which is what a Runtime Manager
+    restart did in the 2026-10-12 benchmark, so do not count on an application restart from
+    Runtime Manager keeping `/tmp`;
   - a **CloudHub 2.0** / Runtime Fabric / Kubernetes **pod replacement** (redeploy,
     rescheduling, node failure, scale-in);
   - a host reboot that clears `/tmp` (tmpfs or systemd-tmpfiles).

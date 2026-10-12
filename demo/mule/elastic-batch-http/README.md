@@ -148,11 +148,14 @@ reports a status per document. The sink reads those statuses:
 
 ## Demo-specific settings
 
-This app deliberately overrides two library defaults so the A/B with
+This app deliberately overrides a library default so the A/B with
 [`elastic-stock-http`](../elastic-stock-http) varies only batching:
 
 - `gzip="false"` — the stock appender cannot compress. Production should leave gzip on.
-- `spillEnabled="false"` — the spill buffer's threads and disk I/O would compete for the
-  worker's fractional vCore. Production should leave spill on. See
-  [`datadog-batch-http`](../datadog-batch-http#resilience-the-disk-spill-safety-net-disabled-in-this-demo)
-  for what it does and how to turn it back on.
+
+Disk spill is **on**, the library default: `spillEnabled="${sys:batch.spillEnabled:-true}"`.
+Queue overflow and batches that fail every retry go to disk and replay when Elasticsearch
+catches up. Set the system property `batch.spillEnabled=false` to measure batching alone;
+overflow then drops per `overflowPolicy`. See
+[`datadog-batch-http`](../datadog-batch-http#resilience-the-disk-spill-safety-net-on-in-this-demo)
+for what spill does and what turning it off changes.

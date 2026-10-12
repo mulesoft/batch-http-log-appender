@@ -230,48 +230,50 @@ accept. Reserved Datadog attributes used by the sink: `message`, `status`,
 library default, but this demo turns it off with `includeTimestamp="false"` so Datadog
 stamps arrival time and ingest lag stays measurable.
 
-## Resilience: the disk-spill safety net (disabled in this demo)
+## Resilience: the disk-spill safety net (on in this demo)
 
 The appender ships a **disk-spill buffer** that is **on by default in the library**: a batch
 that fails after retries is written to rotating segment files instead of being lost, a
 background thread re-ships them once the endpoint recovers, and segments left behind by a
 crash are replayed on the next startup.
 
-**This demo turns it off** with `spillEnabled="false"`. That is a benchmark decision, not a
-recommendation. The buffer runs a replay driver thread that polls on an interval, adds up to
-`spillReplayThreads` transient workers during a replay pass, and does disk I/O on the failure
-and overflow paths. On a 0.1 vCore worker — and more so on a CloudHub 2.0 replica capped near
-0.28–0.4 vCPU — those compete for the same core that serves requests, so leaving them on would
-mean this A/B measures batching *plus* durability machinery. **A production deployment should
-leave spill on**: just omit the attribute.
+**This demo leaves it on**: `log4j2.xml` sets `spillEnabled="${sys:batch.spillEnabled:-true}"`,
+the library default. Nothing touches disk on the happy path; records are written to rotating
+segment files only when a batch fails after retries are exhausted, or when the queue would
+overflow (`spillOnOverflow="true"`). The overload signal is therefore **`spilledRecords`** in the
+stats heartbeat, as the root README's spill section describes. Records lost because the spill
+buffer itself is full land in `spillStats().droppedRecords` (`evictedRecords` for an evicted
+oldest segment), never in `dropped`, which counts terminal rejections (a 4xx) and serialization
+failures. The buffer is bounded (512 MiB total, with a 256 MiB
+free-disk floor); when either limit is hit the **oldest** segment is dropped, so logging can
+never exhaust the disk.
 
-Two consequences while it is off:
+The buffer runs a replay driver thread that polls on an interval, adds up to
+`spillReplayThreads` transient workers during a replay pass, and does disk I/O on the failure
+and overflow paths. On a 0.1 vCore worker — and more so on a CPU-capped CloudHub 2.0 replica —
+those share the core that serves requests. In the 2026-10-12 CloudHub benchmark
+that cost batch req/s only where the queue overflowed the whole time, and nothing measurable in
+the 5-minute tests. A spill backlog lives in the worker's `/tmp`: on CloudHub a restart moves the
+app to a new worker (1.0) or pod (2.0), so a backlog still on disk at that moment is lost.
+
+### Turning it off
+
+Set the system property `batch.spillEnabled=false` (for example as a CloudHub application
+property) to measure batching alone. Two consequences while it is off:
 
 - **Overflow drops again.** `spillOnOverflow` only takes effect when spill is enabled, so a
-  record the in-memory queue cannot accept is discarded per `overflowPolicy` (`DROP_NEWEST`).
-  The overload signal for this app is therefore **`dropped`** in the stats heartbeat. That is
-  the *opposite* of the guidance in the root README's spill section, which describes the
-  library default — with spill on, overflow goes to disk and `spilledRecords` is the signal.
-  Both statements are correct for their configuration; this app is the overridden one.
-  `queueCapacity="25000"` is consequently the entire buffer.
+  record the in-memory queue cannot accept is discarded per `overflowPolicy` (`DROP_NEWEST`),
+  and the overload signal becomes **`dropped`** in the stats heartbeat.
+  `queueCapacity="25000"` is then the entire buffer.
 - **A failed batch is lost.** Batches that exhaust `maxRetries="3"` are counted and dropped
   rather than parked on disk, so an intake outage costs logs.
 
-Every other spill attribute is still present in `log4j2.xml` and is **inert** while
-`spillEnabled="false"`: `spillInstanceId`, `spillReplayIntervalMillis`, `maxSpillFileBytes`,
-`maxTotalSpillBytes`, `minFreeDiskBytes`, `spillOnOverflow`, `spillFormat`,
-`spillRecoveryMode`, `spillStartupReconcile`, `spillBacklogOrder`, `spillReplayThreads` and
-`spillReplayMaxBytesPerSec`. They are kept on purpose — the file is an exhaustive reference,
-and re-enabling durability is then a one-word edit rather than a rediscovery of the tuning.
+Every other spill attribute stays in `log4j2.xml` and is inert while spill is off.
 
-### Turning it back on
+### The crash-resilience knobs
 
-Set `spillEnabled="true"` and the configuration already in the file applies as written. Nothing
-touches disk on the happy path; records are written to rotating segment files only when a batch
-fails after retries are exhausted, or when the queue would overflow. The buffer is bounded
-(512 MiB total, with a 256 MiB free-disk floor); when either limit is hit the **oldest** segment
-is dropped, so logging can never exhaust the disk. The crash-resilience knobs then take effect
-too (see the root README for the full reference):
+With spill on, the crash-resilience settings in the file apply as written (see the root
+README for the full reference):
 
 - **`spillRecoveryMode="ADOPT"`** — segment files left by a previous crash are
   replayed on the next startup, so logs buffered just before the crash still reach
@@ -287,7 +289,7 @@ too (see the root README for the full reference):
   round-trips every character set (non-Latin scripts, emoji, control characters).
   Switch to `spillFormat="JSON"` if you'd rather read the spill files by eye.
 
-With spill enabled, segment files for this demo would live under:
+Segment files for this demo live under:
 
 ```text
 /tmp/batch-http-spill/Datadog/       # %TEMP%\batch-http-spill\Datadog\ on Windows
@@ -303,8 +305,8 @@ sharing one spill directory never collide).
 
 ### Watch it work
 
-This walkthrough needs `spillEnabled="true"`; as shipped, the failed batches are dropped and
-counted instead, and nothing appears on disk.
+This walkthrough uses the demo as shipped, with spill on. (With `batch.spillEnabled=false`
+the failed batches are dropped and counted instead, and nothing appears on disk.)
 
 1. Start the app **without** a valid key (so shipping fails):
 

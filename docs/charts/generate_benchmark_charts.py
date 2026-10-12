@@ -12,8 +12,16 @@ benchmark and re-running this script keeps the charts in lock-step with the repo
     .venv-charts/bin/python docs/charts/generate_benchmark_charts.py
 
 Data source (default): ../.claude/bench-results/loadtest-<label>/  (git-ignored — it
-carries hostnames). Override with BENCH_RESULTS=/path. The charts themselves contain
-NO hostnames or hardware specs — only worker-TYPE names ("0.1 vCore") and app labels.
+carries hostnames). Override with BENCH_RESULTS=/path. Measured log delivery is read from
+DELIVERY_JSON (default: $BENCH_RESULTS/delivery.json), shaped
+{round: {app: {"delivered": N, "expected": M}}}. The published 2026-10-12 run is rebuilt with
+
+    BENCH_RESULTS=.claude/bench-results/publish-020 \
+    DELIVERY_JSON=.claude/bench-results/publish-020/delivery.json \
+    .venv-charts/bin/python docs/charts/generate_benchmark_charts.py
+
+The charts themselves contain NO hostnames or hardware specs — only worker-TYPE names
+("0.1 vCore") and app labels.
 
 Charts produced:
   1. throughput-batch-vs-stock   — sustained req/s (Test 3, 5 min), grouped by plane.
@@ -27,7 +35,12 @@ Charts produced:
                                    plane, showing that batch ramps as warmup amortises
                                    while stock stays flat and far lower (the 1-min
                                    Test-1 number under-reports warm batch throughput).
+  5. delivered-logs              — logs delivered to the vendor as a share of the logs
+                                   the measured requests generated, batch vs stock, per
+                                   test (only when DELIVERY_JSON exists).
 """
+
+import json
 
 import os
 import pathlib
@@ -54,6 +67,9 @@ OUT_DIR = DOCS / "img"
 RESULTS = pathlib.Path(
     os.environ.get("BENCH_RESULTS", REPO / ".claude" / "bench-results")
 )
+DELIVERY = pathlib.Path(os.environ.get("DELIVERY_JSON", RESULTS / "delivery.json"))
+MEASURED = "2026-10-12"
+ENGINE = "0.2.0"
 
 # ---------------------------------------------------------------------------
 # oha output parsing. oha 1.14.0 prints time fields in one of several units and
@@ -112,17 +128,19 @@ def load(label, app):
 
 
 # ---------------------------------------------------------------------------
-# App / plane registry. Concurrency differs by plane on the 2026-08-04 runs
-# (CH1 -c 10, CH2 -c 5), so charts compare batch vs stock WITHIN a plane only.
+# App / plane registry. Concurrency differs by plane (CH1 -c 10, CH2 -c 5), so
+# charts compare batch vs stock WITHIN a plane only.
 # ---------------------------------------------------------------------------
 # (axis_label, batch_app, stock_app, plane_key)
 PAIRS = [
     ("CloudHub 1.0\nDatadog", "dd-ch1-batch", "dd-ch1-stock", "ch1"),
     ("CloudHub 1.0\nNew Relic", "nr-ch1-batch", "nr-ch1-stock", "ch1"),
+    ("CloudHub 1.0\nElasticsearch", "es-ch1-batch", "es-ch1-stock", "ch1"),
     ("CloudHub 2.0\nDatadog", "dd-ch2-batch", "dd-ch2-stock", "ch2"),
     ("CloudHub 2.0\nNew Relic", "nr-ch2-batch", "nr-ch2-stock", "ch2"),
+    ("CloudHub 2.0\nElasticsearch", "es-ch2-batch", "es-ch2-stock", "ch2"),
 ]
-PLATFORM_SPLIT = 2  # divider between index 1 and 2 (CH1 above, CH2 below)
+PLATFORM_SPLIT = 3  # divider between index 2 and 3 (CH1 above, CH2 below)
 CONC = {"ch1": 10, "ch2": 5}
 
 # ---------------------------------------------------------------------------
@@ -201,7 +219,7 @@ def figure_throughput(label="z5m"):
 
     y = list(range(len(PAIRS)))[::-1]
     bar_h = 0.36
-    fig, ax = plt.subplots(figsize=(10.2, 6.6))
+    fig, ax = plt.subplots(figsize=(10.2, 8.8))
 
     for i, pos in enumerate(y):
         s, b = stock[i], batch[i]
@@ -233,16 +251,17 @@ def figure_throughput(label="z5m"):
 
     fig.suptitle("Sustained request throughput: batch vs stock appender",
                  fontsize=18, fontweight="bold", x=0.045, ha="left", y=1.005)
-    fig.text(0.045, 0.945,
-             "5-min run · count=20 log events/request · CH1 -c 10, CH2 -c 5 "
-             "· compare within a plane, not across",
+    fig.text(0.045, 0.958,
+             "5-min run (Test 3) · 22 log events/request · CH1 -c 10, CH2 -c 5 "
+             f"· engine {ENGINE}, spill on · compare within a plane, not across",
              fontsize=11.5, color=MUTED, ha="left", va="top")
     ax.legend(handles=legend_handles(), loc="lower right", frameon=False,
               ncol=1, handlelength=1.9)
     fig.text(0.045, -0.02,
              "× = batch÷stock throughput ratio within that plane+vendor. Concurrency differs by plane "
              "(CH1 -c 10, CH2 -c 5), so\nread each plane's contrast on its own — a CH1 bar is not "
-             "comparable to a CH2 bar.", fontsize=10.5, color=MUTED, ha="left", va="top")
+             f"comparable to a CH2 bar. One run per app, {MEASURED}.",
+             fontsize=10.5, color=MUTED, ha="left", va="top")
     save(fig, "cloudhub-throughput-batch-vs-stock")
 
 
@@ -250,7 +269,7 @@ def figure_throughput(label="z5m"):
 # Figure 2 — latency (Test 3), avg / p90 / p99, log axis, stacked per pair.
 # ===========================================================================
 def figure_latency(label="z5m"):
-    fig, axes = plt.subplots(len(PAIRS), 1, figsize=(9.4, 12.8), sharex=True)
+    fig, axes = plt.subplots(len(PAIRS), 1, figsize=(9.4, 18.4), sharex=True)
     bar_h = 0.34
     metrics = ["Average", "p90", "p99"]
 
@@ -289,16 +308,18 @@ def figure_latency(label="z5m"):
     axes[-1].set_xlabel("Latency in milliseconds — logarithmic scale (lower is better)", labelpad=10)
     fig.suptitle("Request latency: stock vs batch appender (5-min run)",
                  fontsize=18, fontweight="bold", x=0.052, ha="left", y=0.997)
-    fig.text(0.052, 0.973,
-             "count=20 log events/request · CH1 -c 10, CH2 -c 5 · compare within a plane",
+    fig.text(0.052, 0.981,
+             f"22 log events/request · CH1 -c 10, CH2 -c 5 · engine {ENGINE}, spill on "
+             "· compare within a plane",
              fontsize=11.5, color=MUTED, ha="left", va="top")
-    fig.legend(handles=legend_handles(), loc="upper left", bbox_to_anchor=(0.048, 0.955),
+    fig.legend(handles=legend_handles(), loc="upper left", bbox_to_anchor=(0.048, 0.969),
                frameon=False, ncol=2, columnspacing=2.4, handlelength=1.9)
     fig.text(0.052, 0.008,
              "Logarithmic axis: every gridline is 10× the one before it — read the printed numbers, "
              "not the bar lengths.\nThe true gap is larger than the bars look.",
              fontsize=10.5, color=MUTED, ha="left", va="top")
-    fig.tight_layout(rect=(0, 0.03, 1, 0.95))
+    fig.tight_layout(rect=(0, 0.02, 1, 0.962))
+    _draw_platform_divider(fig, axes)
     save(fig, "cloudhub-latency-batch-vs-stock")
 
 
@@ -326,7 +347,7 @@ def _draw_platform_divider(fig, axes):
 # ===========================================================================
 def figure_latency_range(label="z5m"):
     metrics = ["Average", "p90", "p99"]
-    fig, axes = plt.subplots(len(PAIRS), 1, figsize=(9.2, 12.6), sharex=True)
+    fig, axes = plt.subplots(len(PAIRS), 1, figsize=(9.2, 18.0), sharex=True)
 
     for ax, pair in zip(axes, PAIRS):
         b = load(label, pair[1])
@@ -380,11 +401,12 @@ def figure_latency_range(label="z5m"):
     ]
 
     fig.suptitle("Request latency: stock appender vs batch appender (5-min run)",
-                 fontsize=19, fontweight="bold", x=0.052, ha="left", y=0.990)
-    fig.text(0.052, 0.963,
-             "count=20 log events/request · CH1 -c 10, CH2 -c 5 · compare within a plane",
+                 fontsize=19, fontweight="bold", x=0.052, ha="left", y=0.993)
+    fig.text(0.052, 0.974,
+             f"22 log events/request · CH1 -c 10, CH2 -c 5 · engine {ENGINE}, spill on "
+             "· compare within a plane",
              fontsize=11.5, color=MUTED, ha="left", va="top")
-    fig.legend(handles=handles, loc="upper left", bbox_to_anchor=(0.048, 0.943),
+    fig.legend(handles=handles, loc="upper left", bbox_to_anchor=(0.048, 0.960),
                frameon=False, ncol=2, columnspacing=2.4, handlelength=1.6)
     fig.text(0.052, 0.016,
              "Each marker is a measured value and the bar between them is the improvement. "
@@ -392,12 +414,12 @@ def figure_latency_range(label="z5m"):
              "difference — the true gap is larger than it looks.\nPanels either side of the dashed "
              "divider ran on different CPU models — a burstable CloudHub 1.0 worker versus a\n"
              "hard-capped CloudHub 2.0 replica, at different concurrency (CH1 -c 10, CH2 -c 5) — so "
-             "they are not a controlled\ncomparison of each other. gzip and disk spill were off, so "
-             "this measures batching in isolation, not the appender\nas deployed. Sustained 5-minute "
-             "run (Test 3), one run per configuration, 2026-08-04.",
+             "they are not a controlled\ncomparison of each other. Batch apps ran with disk spill on "
+             "and gzip off (the stock appender cannot\ncompress). Sustained 5-minute "
+             f"run (Test 3), one run per app, {MEASURED}.",
              fontsize=10.5, color=MUTED, ha="left", va="bottom", linespacing=1.5)
 
-    fig.tight_layout(rect=(0.02, 0.108, 0.98, 0.920))
+    fig.tight_layout(rect=(0.02, 0.088, 0.98, 0.948))
     _draw_platform_divider(fig, axes)
     save(fig, "cloudhub-latency-batch-vs-stock-range")
 
@@ -476,30 +498,134 @@ def figure_warmup():
     phases = [("Test 1\n1 min", "z1m"), ("Churn\n1 min", "z1m_churn"),
               ("Test 3\n5 min", "z5m")]
 
-    fig, (axL, axR) = plt.subplots(1, 2, figsize=(14.2, 6.8))
-    _warmup_panel(axL, ch1, phases, "CloudHub 1.0  (-c 10)")
-    _warmup_panel(axR, ch2, phases, "CloudHub 2.0  (-c 5)")
-    axL.set_ylabel("Requests / second  (higher is better)", labelpad=10)
+    # Three vendors per plane: the planes stack (CH1 above, CH2 below) so each
+    # panel keeps the full width for its 3 apps × 3 phases.
+    fig, (axT, axB) = plt.subplots(2, 1, figsize=(14.2, 12.6))
+    _warmup_panel(axT, ch1, phases, "CloudHub 1.0  (-c 10)")
+    _warmup_panel(axB, ch2, phases, "CloudHub 2.0  (-c 5)")
+    for ax in (axT, axB):
+        ax.set_ylabel("Requests / second  (higher is better)", labelpad=10)
 
     fig.suptitle("Warmup: batch throughput ramps as cold-start is amortised — stock stays flat and far lower",
-                 fontsize=16.5, fontweight="bold", x=0.045, ha="left", y=1.010)
-    fig.text(0.045, 0.958,
+                 fontsize=16.5, fontweight="bold", x=0.045, ha="left", y=1.000)
+    fig.text(0.045, 0.975,
              "req/s per phase, batch vs stock side by side · Test 1 (1 min) → Churn (1 min, warm) "
-             "→ Test 3 (5 min)",
+             f"→ Test 3 (5 min) · engine {ENGINE}, spill on",
              fontsize=11.5, color=MUTED, ha="left", va="top")
-    fig.legend(handles=legend_handles(), loc="upper left", bbox_to_anchor=(0.045, 0.918),
+    fig.legend(handles=legend_handles(), loc="upper left", bbox_to_anchor=(0.045, 0.958),
                frameon=False, ncol=2, columnspacing=2.2, handlelength=1.9)
-    fig.text(0.045, -0.05,
-             "× = batch÷stock req/s for that phase. Batch rises Test 1 → churn → Test 3 as the cold-start "
-             "ramp (JIT/TLS/connection pools) is\namortised over a longer window, so the 1-min Test 1 "
-             "under-reports warm batch throughput; stock barely moves. Even cold batch\n(Test 1) already "
-             "beats warm stock. The two planes ran at different concurrency and CPU (CH1 -c 10 burstable, "
-             "CH2 -c 5 hard-capped),\nso each panel is on its own y-scale — read within a panel, not across. "
-             "One run per configuration, 2026-08-04.",
+    fig.text(0.045, -0.005,
+             "× = batch÷stock req/s for that phase. Batch rises Test 1 → Test 3 as the cold-start "
+             "ramp (JIT/TLS/connection pools) is amortised over a\nlonger window, so the 1-min Test 1 "
+             "under-reports warm batch throughput; stock stays flat or falls as its backlog grows. "
+             "Even cold\nbatch (Test 1) already beats warm stock. New Relic on CloudHub 1.0 dips in the "
+             "churn window: its queue overflows to disk the whole\nminute (the US intake drains slower "
+             "than the app logs), and the spill I/O shares the 0.1 vCore. The two planes ran at "
+             "different\nconcurrency and CPU (CH1 -c 10 burstable, CH2 -c 5 hard-capped), so each panel "
+             f"is on its own y-scale — read within a panel,\nnot across. One run per app, {MEASURED}.",
              fontsize=10.5, color=MUTED, ha="left", va="top", linespacing=1.5)
 
-    fig.tight_layout(rect=(0, 0.02, 1, 0.89))
+    fig.tight_layout(rect=(0, 0.02, 1, 0.935), h_pad=4.0)
     save(fig, "cloudhub-warmup-cold-start")
+
+
+# ===========================================================================
+# Figure 4 — logs delivered. For every app and test: logs that reached the
+# vendor ÷ logs the measured requests generated (responses × 22), batch and
+# stock side by side, CH1 above, CH2 below. Elasticsearch is counted by event
+# time inside the oha window; Datadog and New Relic by arrival time, from the
+# test start to the next test on the same app. Over 100% = late backlog from
+# an earlier test, or log lines of requests oha cut off.
+# ===========================================================================
+_DELIVERY_PHASES = [("Test 1\n1 min", "z1m"), ("Churn\n1 min", "z1m_churn"),
+                    ("Test 3\n5 min", "z5m"), ("Test 4\n5m, -t 30s", "z5m_t30s")]
+
+
+def _delivered(data, label, app):
+    rec = data.get(label, {}).get(app)
+    if not rec or not rec.get("expected"):
+        return None
+    return rec["delivered"] / rec["expected"] * 100
+
+
+def _delivery_panel(ax, data, pairs, title):
+    step_phase = 1.0
+    gap_app = 1.25
+    bw = 0.40
+    n = len(_DELIVERY_PHASES)
+    cluster_x, cluster_lbl, app_marks = [], [], []
+    ymax = 100.0
+    for ai, pair in enumerate(pairs):
+        base = ai * ((n - 1) * step_phase + gap_app)
+        for pi, (plabel_txt, plabel) in enumerate(_DELIVERY_PHASES):
+            c = base + pi * step_phase
+            for off, app, fill, edge, hatch, ink in (
+                    (-0.215, pair[1], BATCH_FILL, BATCH_EDGE, "///", INK),
+                    (+0.215, pair[2], STOCK_FILL, STOCK_EDGE, None, STOCK_EDGE)):
+                v = _delivered(data, plabel, app)
+                if v is None:
+                    continue
+                ymax = max(ymax, v)
+                ax.bar(c + off, v, width=bw, color=fill, edgecolor=edge, linewidth=1.1,
+                       hatch=hatch, zorder=3)
+                ax.text(c + off, v + 2.5, f"{v:.0f}", ha="center", va="bottom",
+                        fontsize=9, fontweight="bold", color=ink, zorder=4, rotation=90)
+            cluster_x.append(c)
+            cluster_lbl.append(plabel_txt)
+        app_marks.append((base + (n - 1) * step_phase / 2, pair[0]))
+
+    ax.axhline(100, color=MUTED, linewidth=1.2, linestyle=(0, (4, 3)), zorder=2)
+    ax.set_ylim(0, ymax * 1.18)
+    ax.set_xlim(-0.7, cluster_x[-1] + 0.7)
+    ax.set_xticks(cluster_x)
+    ax.set_xticklabels(cluster_lbl, fontsize=9.5)
+    ax.tick_params(axis="x", length=0)
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _p: f"{v:.0f}%"))
+    ax.grid(axis="y", color=GRID, linewidth=0.9, zorder=0)
+    ax.set_axisbelow(True)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    ax.set_title(title, loc="left", fontsize=14, fontweight="bold", pad=8)
+    for cx, name in app_marks:
+        ax.text(cx, -0.17, name.split("\n")[-1], transform=ax.get_xaxis_transform(),
+                ha="center", va="top", fontsize=12, fontweight="bold", color=INK)
+
+
+def figure_delivered():
+    if not DELIVERY.exists():
+        print("  (no", DELIVERY, "— skipping delivered-logs figure)")
+        return
+    data = json.loads(DELIVERY.read_text())
+    ch1 = [p for p in PAIRS if p[3] == "ch1"]
+    ch2 = [p for p in PAIRS if p[3] == "ch2"]
+
+    fig, (axT, axB) = plt.subplots(2, 1, figsize=(14.2, 11.6))
+    _delivery_panel(axT, data, ch1, "CloudHub 1.0  (-c 10)")
+    _delivery_panel(axB, data, ch2, "CloudHub 2.0  (-c 5)")
+    for ax in (axT, axB):
+        ax.set_ylabel("Logs delivered, % of logs generated", labelpad=10)
+
+    fig.suptitle("Logs delivered: batch vs stock appender, per test",
+                 fontsize=16.5, fontweight="bold", x=0.045, ha="left", y=1.000)
+    fig.text(0.045, 0.975,
+             "logs that reached the vendor ÷ (responses × 22) · dashed line = 100% "
+             f"· engine {ENGINE}, spill on",
+             fontsize=11.5, color=MUTED, ha="left", va="top")
+    fig.legend(handles=legend_handles(), loc="upper left", bbox_to_anchor=(0.045, 0.958),
+               frameon=False, ncol=2, columnspacing=2.2, handlelength=1.9)
+    fig.text(0.045, -0.005,
+             "Elasticsearch is counted by event time inside the load window; Datadog and New Relic by "
+             "arrival time, from the test start to the next test on\nthe same app. Over 100% = late "
+             "backlog from an earlier test arriving in the window, or log lines of requests oha cut off. "
+             "New Relic batch\nreads low in Test 3 because its spill backlog was still draining to the "
+             "US intake when the next round's restart replaced the worker or pod;\nTest 4 was the last "
+             "round, nothing restarted after it, and the backlog drained. Stock loses its in-memory "
+             "backlog at every restart\n(Elasticsearch stock reads 0% in churn: those events were still "
+             f"queued behind the Test 1 backlog when the next restart came). One run per app, {MEASURED}.",
+             fontsize=10.5, color=MUTED, ha="left", va="top", linespacing=1.5)
+
+    fig.tight_layout(rect=(0, 0.02, 1, 0.935), h_pad=4.5)
+    save(fig, "cloudhub-delivered-logs")
 
 
 def main():
@@ -517,6 +643,7 @@ def main():
     figure_latency()
     figure_latency_range()
     figure_warmup()
+    figure_delivered()
     print("done.")
 
 
