@@ -48,7 +48,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 /**
- * What {@code close()} does with records it could not send in time. Before 0.1.6 the flushers
+ * What {@code close()} does with records it could not send in time. Before 0.2.0 the flushers
  * flushed only the batch each was holding, and whatever was still queued simply vanished: it
  * was counted in {@code accepted} and nowhere else. Now the remainder is spilled (and replayed
  * by the next start) or, with no spill buffer, counted as dropped with an ERROR — and the POISON

@@ -2,10 +2,16 @@
 
 All notable changes to the Batch HTTP Log Appender are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
-[Semantic Versioning](https://semver.org/). The README's "New in v0.1.x" notes carry the
+[Semantic Versioning](https://semver.org/). The README's "New in v0.x" notes carry the
 longer, upgrade-oriented explanation of each release.
 
-## [0.1.6] — Unreleased
+## [0.2.0] — 2026-10-12
+
+The minor version marks Elasticsearch as a first-class vendor alongside Datadog, Splunk HEC,
+New Relic and Dynatrace. The sink and its per-document bulk retry shipped in 0.1.5; 0.2.0 adds
+the durability and accounting work below, runs every demo with disk spill on, and republishes
+the CloudHub benchmark with all three vendors and measured log delivery. No configuration
+changes are needed to upgrade from 0.1.5.
 
 ### Fixed
 - **Evicted spill records are now counted.** When the spill buffer deletes its oldest segment
@@ -83,6 +89,17 @@ longer, upgrade-oriented explanation of each release.
   joins short.
 - A second store with the same `spillInstanceId` creates its segment files exclusively, so
   two writers never append to the same file.
+- **Demos: disk spill is on by default** in the Datadog, New Relic and Elastic batch demos
+  (`spillEnabled="${sys:batch.spillEnabled:-true}"`, the library default). Set the property
+  `batch.spillEnabled=false` to measure batching alone. The demos build against `0.2.0`.
+- **Benchmark republished** (`docs/benchmark-results.md`, `docs/index.html`, `docs/img/`): all
+  twelve demo apps (Datadog, New Relic, Elastic × CloudHub 1.0 / 2.0 × batch / stock) on
+  engine 0.2.0 with spill on, run as three parallel vendor lanes with one app per vendor at a
+  time, and with logs delivered counted at each vendor. It also corrects the CloudHub 2.0
+  Datadog stock result: the earlier run's stock app carried a leftover
+  `AsyncLoggerConfig.RingBufferSize=20000` and `log4j2.debug=true`, which made stock look
+  about four times faster than it is. A caveat now notes that New Relic results depend on
+  location: the workers run in Sydney and New Relic's intake is in the US.
 
 ### Added
 - Coalesced WARN when the spill buffer evicts or refuses records: `spill buffer full (…):
@@ -195,6 +212,6 @@ No appender code changed.
 - Initial release: the batching Log4j2 appender (`<BatchHttp>`) on a vendor-neutral core
   engine. Pre-publication history lives in the development repository.
 
-[0.1.6]: https://github.com/mulesoft/batch-http-log-appender/compare/v0.1.5...HEAD
+[0.2.0]: https://github.com/mulesoft/batch-http-log-appender/compare/v0.1.5...v0.2.0
 [0.1.5]: https://github.com/mulesoft/batch-http-log-appender/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/mulesoft/batch-http-log-appender/releases/tag/v0.1.4

@@ -110,7 +110,7 @@ not request counts or requests/sec).
   apps ship to the US endpoint (`log-api.newrelic.com`), so every request crosses the Pacific,
   which limits how fast the appender can deliver. Requests per second measures how responsive
   the app stays, not how many logs arrive. A later delivery-checked run (2026-10-12, engine
-  0.1.6) found that with this demo configuration (spill off) New Relic batch delivered only
+  0.2.0) found that with this demo configuration (spill off) New Relic batch delivered only
   about 10–33% of the logs at sustained load, while Datadog delivered 100%. With spill on,
   every log arrived, but a 5-minute burst took about 12 minutes to drain, and a backlog still
   on disk is lost if the worker is replaced first. Workers closer to the New Relic region, or
@@ -213,7 +213,7 @@ flowchart TD
 **Prerequisites:** JDK 17+ and Maven 3.8+ (`java -version`, `mvn -version`).
 
 The project is a Maven multi-module reactor (`groupId` `com.mulesoft.support.batchhttp`, version
-`0.1.6`). To build everything and install the artifacts into your local
+`0.2.0`). To build everything and install the artifacts into your local
 Maven repository (`~/.m2/repository`) so other projects can depend on them:
 
 ```bash
@@ -241,7 +241,7 @@ After install, the artifacts are available to other builds as:
 <dependency>
     <groupId>com.mulesoft.support.batchhttp</groupId>
     <artifactId>batch-http-log4j2</artifactId>
-    <version>0.1.6</version>
+    <version>0.2.0</version>
 </dependency>
 ```
 
@@ -695,7 +695,11 @@ traces) rides along as attributes.
 
 <!-- -->
 
-> **New in v0.1.6 — spill accounting and crash recovery:** records in an evicted spill segment
+> **New in v0.2.0 — Elasticsearch as a first-class vendor, spill accounting and crash
+> recovery:** the minor version marks Elasticsearch (added in 0.1.5) as a supported vendor
+> alongside Datadog, Splunk HEC, New Relic and Dynatrace, and the benchmark now covers it,
+> with logs delivered measured at every vendor. The batch demos run with disk spill on. In
+> the engine, records in an evicted spill segment
 > are now counted (`spillStats().droppedRecords` / `evictedRecords`) and reported in a
 > coalesced WARN. A spill refusal is counted once, not twice. Records still queued when the
 > appender stops are spilled for the next start, or counted as dropped. After a runtime/JVM
@@ -982,7 +986,7 @@ skipped entirely when `minFreeDiskBytes` is 0 — to keep the spill path cheap o
 CPU-throttled workers.)
 
 **Crash-corruption tolerance (both formats).** Both formats frame each record as
-`SYNC + length + CRC32C + payload` (`JSON` since 0.1.6). If a runtime crash leaves the journal improperly
+`SYNC + length + CRC32C + payload` (`JSON` since 0.2.0). If a runtime crash leaves the journal improperly
 closed and a record corrupted — a torn tail, a zero-filled block, or bit-rot in the
 middle of a segment — the reader detects the bad frame (failed sync, insane length, or
 CRC mismatch), **skips exactly the damaged record, and resumes from the next intact one**,
@@ -1021,7 +1025,7 @@ Turn it off, or point it somewhere durable, in `log4j2.xml`:
 | `minFreeDiskBytes` | 268435456 (256 MiB) | filesystem free-space floor; dropping below it evicts the oldest segment. It bounds the impact on the **volume**, not on this buffer, so it is deliberately not scaled to `maxTotalSpillBytes` — the spill directory usually shares a filesystem with the runtime's own logs and temp files, and this is the margin left for them. On a volume with less than this usable, spill degrades to counting drops rather than writing; lower it for a small dedicated volume. The probe is a syscall, so it is throttled (≈ once per few MB written); set to 0 to disable it and skip the syscall entirely. Evicted records are counted and reported as for `maxTotalSpillBytes` |
 | `spillReplayIntervalMillis` | 10000 | how often the replayer attempts to drain segments. When segments are already on disk at startup (a previous run or a crash), the first pass runs immediately |
 | `spillOnOverflow` | true | also divert queue-overflow records to disk (vs. dropping them) |
-| `spillFormat` | `BINARY` | on-disk record encoding: `BINARY` (compact TLV, all charsets, **corruption-tolerant** sync+CRC framing) or `JSON` (human-readable, same corruption-tolerant sync+CRC framing since 0.1.6) |
+| `spillFormat` | `BINARY` | on-disk record encoding: `BINARY` (compact TLV, all charsets, **corruption-tolerant** sync+CRC framing) or `JSON` (human-readable, same corruption-tolerant sync+CRC framing since 0.2.0) |
 | `spillRecoveryMode` | `ADOPT` | what to do with segments left by a previous run: `ADOPT` replays them, `IGNORE` leaves them untouched, `DELETE` discards them at startup |
 | `spillStartupReconcile` | true | at startup, evict oldest segments to satisfy the total cap and free-space floor before writing new logs |
 | `spillBacklogOrder` | `OLDEST_FIRST` | drain order: `OLDEST_FIRST`, `NEWEST_FIRST`, or `DUAL_STREAM` (ship freshest logs and the historical backlog in parallel) |
@@ -1125,7 +1129,7 @@ an OOM kill, a worker crash under load):
 
 - **Corrupted-journal recovery** — a record damaged by an improperly-closed journal is
   skipped and replay resumes from the next intact one, rather than everything after the
-  damage being abandoned. This applies to both formats (`JSON` since 0.1.6), which is what the
+  damage being abandoned. This applies to both formats (`JSON` since 0.2.0), which is what the
   `SYNC + length + CRC32C` framing buys. Legacy v1 `JSON` segments (0.1.5 and earlier) stop
   at mid-segment damage, with the discarded bytes counted. An unreadable segment (I/O error)
   is skipped for that pass and retried later, never blocking the segments behind it. See

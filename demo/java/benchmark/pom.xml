@@ -7,7 +7,7 @@
     <parent>
         <groupId>com.mulesoft.support.batchhttp</groupId>
         <artifactId>batch-http-appender-parent</artifactId>
-        <version>0.1.6</version>
+        <version>0.2.0</version>
         <relativePath>../../../pom.xml</relativePath>
     </parent>
 

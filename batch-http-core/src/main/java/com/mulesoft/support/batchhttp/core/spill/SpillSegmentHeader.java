@@ -40,7 +40,7 @@ package com.mulesoft.support.batchhttp.core.spill;
  *       keeps everything before it (the reader counts the discarded bytes). Used by
  *       JSON segments written by 0.1.5 and earlier, and by every pre-upgrade segment.</li>
  *   <li>{@link #VERSION_V2} — {@code [SYNC(4)] [length(4)] [crc32c(4)] [payload]} per
- *       record (both codecs; JSON since 0.1.6). The sync marker plus per-frame CRC let the reader skip a
+ *       record (both codecs; JSON since 0.2.0). The sync marker plus per-frame CRC let the reader skip a
  *       corrupt record in the <em>middle</em> of a segment and resync on the next intact
  *       one — and make that resync safe for arbitrary payload bytes (HTTP wire dumps,
  *       embedded JSON, raw binary), since content that merely looks like the marker is

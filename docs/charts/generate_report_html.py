@@ -399,7 +399,7 @@ TEMPLATE = '''<!DOCTYPE html>
       New Relic offers only US and EU regions; these apps ship to the US endpoint
       (<code>log-api.newrelic.com</code>), so every request crosses the Pacific, which limits how
       fast the appender can deliver. Requests/sec measures how responsive the app stays, not how
-      many logs arrive. A later delivery-checked run (2026-10-12, engine 0.1.6) found that with
+      many logs arrive. A later delivery-checked run (2026-10-12, engine 0.2.0) found that with
       this demo configuration (spill off) New Relic batch delivered only about 10–33% of the logs
       at sustained load, while Datadog delivered 100%. With spill on, every log arrived, but a
       5-minute burst took about 12 minutes to drain, and a backlog still on disk is lost if the

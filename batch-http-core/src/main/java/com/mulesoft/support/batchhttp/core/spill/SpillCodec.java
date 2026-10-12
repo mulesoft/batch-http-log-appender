@@ -70,7 +70,7 @@ public interface SpillCodec {
     /**
      * Which per-record framing this codec's segments use (see {@link SpillSegmentHeader}).
      * Both built-in codecs opt into the crash-resilient, self-synchronizing
-     * {@code VERSION_V2} framing (JSON since 0.1.6). Default is v1 so any future codec is safe
+     * {@code VERSION_V2} framing (JSON since 0.2.0). Default is v1 so any future codec is safe
      * until it explicitly upgrades.
      */
     default byte framingVersion() {

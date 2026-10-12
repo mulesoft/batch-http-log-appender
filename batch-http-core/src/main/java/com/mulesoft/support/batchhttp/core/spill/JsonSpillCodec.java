@@ -43,7 +43,7 @@ public final class JsonSpillCodec implements SpillCodec {
 
     /**
      * JSON segments use the same {@code VERSION_V2} sync-marker + CRC framing as binary ones
-     * (since 0.1.6), so a record damaged in the middle of a JSON segment is skipped and replay
+     * (since 0.2.0), so a record damaged in the middle of a JSON segment is skipped and replay
      * resumes at the next intact record, and a flipped byte inside a string field is rejected
      * by the checksum instead of being delivered garbled. The payload between the 12-byte frame
      * headers is still plain UTF-8 JSON, readable by eye. Segments written by 0.1.5 and earlier
