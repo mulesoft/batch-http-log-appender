@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Mule application Log4j2 configuration — STOCK HttpAppender variant (A/B control).
+
+  This is the ONLY file that differs in substance from mule-dynatrace-demo. Instead of
+  our batching <BatchHttp> appender, it uses Log4j2's built-in <Http> appender, which
+  performs ONE SYNCHRONOUS HTTP POST PER LOG EVENT — here to the same Log Monitoring
+  API v2 endpoint (POST /api/v2/logs/ingest), which accepts a single JSON object as well
+  as an array and answers 204. There is no batching, no in-memory queue coalescing, no
+  gzip option, no disk-spill — every event is its own round-trip.
+
+  Environment URL and token injection (identical chains to the batch sibling):
+    url    ${sys:DT_ENVIRONMENT_URL:-${sys:dynatrace.url:-${env:DT_ENVIRONMENT_URL:-https://set-dynatrace-url.invalid}}}
+    token  ${sys:DT_API_TOKEN:-${sys:dynatrace.token:-${env:DT_API_TOKEN:-MISSING_TOKEN}}}
+  Unlike the batch sink, this appender cannot normalize the URL: give it the BARE
+  environment URL with no trailing slash, and /api/v2/logs/ingest is appended below.
+  To measure against a local mock intake instead, start the runtime with
+  -Ddynatrace.ingestUrl=http://localhost:9099/api/v2/logs/ingest, which replaces the whole URL.
+
+  NOTE: the stock <Http> appender is part of log4j-core, which the Mule runtime provides
+  on its container classloader. There is NO custom plugin here, so (unlike the batch app)
+  the <Configuration> needs no `packages` scan attribute.
+-->
+<Configuration status="WARN">
+
+    <Properties>
+        <!-- Same properties, chains and defaults as the batch sibling — see its log4j2.xml for
+             the reasoning behind each. The stock <Http> appender has no source attribute, so
+             these are injected into the PatternLayout and the URL below.
+               dt.source    ${sys:domain} (the CloudHub application name; on CloudHub 2.0 a
+                            `domain` application property), falling back to this app's own name.
+                            It is the only field that separates the pair in the shared
+                            environment. Delete an override, don't clear it: a present-but-empty
+                            property beats the ${sys:x:-default} default. -->
+        <Property name="dt.source">${sys:domain:-dynatrace-stock-http}</Property>
+        <Property name="app.platform">${sys:app.platform:-${env:APP_PLATFORM:-unspecified}}</Property>
+        <Property name="dt.url">${sys:DT_ENVIRONMENT_URL:-${sys:dynatrace.url:-${env:DT_ENVIRONMENT_URL:-https://set-dynatrace-url.invalid}}}</Property>
+    </Properties>
+
+    <Appenders>
+        <!-- CloudHub 1.0 custom log appender — IDENTICAL to the batch sibling (same path,
+             same layout, same rollover) so the only difference in the pair is the vendor
+             appender. See https://docs.mulesoft.com/cloudhub/custom-log-appender -->
+        <RollingFile name="FILE"
+                     fileName="/opt/mule/mule-CURRENT/logs/mule-${sys:domain}.log"
+                     filePattern="/opt/mule/mule-CURRENT/logs/mule-${sys:domain}-%i.log">
+            <PatternLayout pattern="[%d{MM-dd HH:mm:ss.SSS}] %-5p %c{1} [%t]: %m%n"/>
+            <DefaultRolloverStrategy max="10"/>
+            <Policies>
+                <SizeBasedTriggeringPolicy size="10 MB" />
+            </Policies>
+        </RollingFile>
+
+        <!--
+          STOCK Log4j2 HttpAppender: one blocking POST per event to the log ingest API.
+            url          : ${dt.url}/api/v2/logs/ingest — the same environment and endpoint as
+                           the batch sibling. -Ddynatrace.ingestUrl replaces the whole URL, for a
+                           mock intake.
+            *TimeoutMillis: matched to the batch app's requestTimeoutMillis (10s) for fairness.
+            <Property>   : request headers. `Authorization: Api-Token <token>` authenticates (an
+                           access token with the logs.ingest scope); the Content-Type is the one
+                           the batch sink sends, because the body IS one JSON log object.
+
+          The layout spells out, attribute for attribute, the log object the batch sibling's
+          sink builds from the Log4j2 event, in the same order: content, loglevel, timestamp
+          (the event time, UTC, millisecond precision), logger.name, thread.name, log.source,
+          and the two MDC entries Mule sets on every <logger> event as top-level
+          correlationId / processorPath attributes.
+
+          `content` is the SAME single-line string the batch sibling ships: its layout prepends
+          {"platform":"…", to the flow's collapsed JSON; here that string is embedded as a JSON
+          string value, so the quotes in the literal prefix are written \\&quot; (Log4j2 turns
+          \\ into one backslash) and the flow's part is escaped by %enc{…}{JSON}. The \x7B in the
+          %replace regex is the hex-escaped leading brace, so Log4j2's brace-counting does not
+          miscount. Neither app asks Dynatrace to parse the JSON inside `content`; the README's
+          optional OpenPipeline rule does that for both alike.
+          The batch sibling omits an attribute whose MDC key is absent; %X{…} renders an empty
+          string instead. Mule sets both keys on every flow <logger> event, so in practice they
+          match. The batch sink also adds error.stack for an event carrying a throwable; Mule's
+          <logger> never attaches one, so this layout leaves it out.
+        -->
+        <Http name="dynatrace"
+              url="${sys:dynatrace.ingestUrl:-${dt.url}/api/v2/logs/ingest}"
+              connectTimeoutMillis="10000"
+              readTimeoutMillis="10000">
+            <Property name="Authorization"
+                      value="Api-Token ${sys:DT_API_TOKEN:-${sys:dynatrace.token:-${env:DT_API_TOKEN:-MISSING_TOKEN}}}"/>
+            <Property name="Content-Type" value="application/json; charset=utf-8"/>
+            <PatternLayout pattern="{&quot;content&quot;:&quot;{\\&quot;platform\\&quot;:\\&quot;${app.platform}\\&quot;,%enc{%replace{%m}{^\x7B\s*|[\r\n]+\s*}{}}{JSON}&quot;,&quot;loglevel&quot;:&quot;%p&quot;,&quot;timestamp&quot;:&quot;%d{yyyy-MM-dd'T'HH:mm:ss.SSS'Z'}{UTC}&quot;,&quot;logger.name&quot;:&quot;%c&quot;,&quot;thread.name&quot;:&quot;%t&quot;,&quot;log.source&quot;:&quot;${dt.source}&quot;,&quot;correlationId&quot;:&quot;%X{correlationId}&quot;,&quot;processorPath&quot;:&quot;%X{processorPath}&quot;}"/>
+        </Http>
+    </Appenders>
+
+    <Loggers>
+        <!--
+          IDENTICAL logger wiring to the batch app (AsyncLogger, same category, additivity,
+          same file appender) so the appender is the only variable. With the stock appender
+          behind an AsyncLogger, the disruptor's single background thread must serialize one
+          blocking POST per event — so the backlog and back-pressure you observe IS the cost
+          of not batching.
+        -->
+        <AsyncLogger name="com.mulesoft.support.batchhttp.muledemo" level="INFO" additivity="false">
+            <AppenderRef ref="dynatrace"/>
+            <AppenderRef ref="FILE"/>
+        </AsyncLogger>
+
+        <!-- Framework noise-reduction categories, copied from the CloudHub doc — identical to
+             the batch sibling so the logger wiring stays constant across the A/B pair. -->
+        <AsyncLogger name="com.gigaspaces" level="ERROR"/>
+        <AsyncLogger name="com.j_spaces" level="ERROR"/>
+        <AsyncLogger name="com.sun.jini" level="ERROR"/>
+        <AsyncLogger name="net.jini" level="ERROR"/>
+        <AsyncLogger name="org.apache" level="WARN"/>
+        <AsyncLogger name="org.apache.cxf" level="WARN"/>
+        <AsyncLogger name="org.springframework.beans.factory" level="WARN"/>
+        <AsyncLogger name="org.mule" level="INFO"/>
+        <AsyncLogger name="com.mulesoft" level="INFO"/>
+        <AsyncLogger name="org.jetel" level="WARN"/>
+        <AsyncLogger name="Tracking" level="WARN"/>
+
+        <!-- Root carries the FILE appender ONLY — identical to the batch sibling. Here the
+             layout output IS the POST body, so a plain-text framework line would still be a
+             valid log object but with a garbled `content`; keeping the vendor path to the
+             application logger keeps both apps' records the same shape. -->
+        <AsyncRoot level="INFO">
+            <AppenderRef ref="FILE"/>
+        </AsyncRoot>
+    </Loggers>
+</Configuration>

@@ -1,0 +1,199 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Mule application Log4j2 configuration.
+
+  IMPORTANT — how the Dynatrace environment URL and access token are injected:
+    This file is parsed by Log4j2, NOT by Mule's property resolver, so Mule
+    ${...} placeholders do NOT work here. Use a Log4j2 lookup instead:
+
+      ${sys:dynatrace.token}  -> CloudHub (secure) application property / -Ddynatrace.token=...
+      ${env:DT_API_TOKEN}     -> environment variable
+
+    Both values prefer the system property and fall back to the env var:
+      url    ${sys:DT_ENVIRONMENT_URL:-${sys:dynatrace.url:-${env:DT_ENVIRONMENT_URL:-https://set-dynatrace-url.invalid}}}
+      token  ${sys:DT_API_TOKEN:-${sys:dynatrace.token:-${env:DT_API_TOKEN:-MISSING_TOKEN}}}
+
+    dynatrace.url is the environment URL Dynatrace publishes for the API — on SaaS
+    https://<environment-id>.live.dynatrace.com (NOT the *.apps.dynatrace.com address of
+    the platform UI), on an ActiveGate https://<activegate>:9999/e/<environment-id>. The
+    sink appends /api/v2/logs/ingest, and also accepts a URL that already ends in it. The
+    fallback is a reserved .invalid host, so an unconfigured app fails DNS loudly instead
+    of shipping anywhere. dynatrace.token is an access token (dt0c01.…) carrying ONLY the
+    logs.ingest scope. In CloudHub set both as application properties, the token as a
+    SECURE one.
+
+  The `packages` attribute makes Log4j2 scan our plugin package so the <BatchHttp>
+  element is recognized inside the Mule app classloader.
+
+  status="INFO": the <BatchHttp> appender reports its OWN health (dropped batches, HTTP
+  status of failures, queue overflow) and an optional stats heartbeat to Log4j2's
+  StatusLogger — this `status` level is the floor that lets those lines (and the INFO
+  heartbeat) actually print to the runtime console. Drop to "WARN" to keep only failures.
+-->
+<Configuration status="INFO" packages="com.mulesoft.support.batchhttp.log4j2">
+    <Properties>
+        <!-- Dynatrace log.source: this app's identity, and the only field separating it from its
+             A/B sibling (dynatrace-stock-http) and from its own other-plane deployment in the
+             shared environment. The Dynatrace sink has no service/host attributes, so log.source
+             carries both jobs: ${sys:domain} is the CloudHub application name — CloudHub 1.0
+             sets it on every app (e.g. dynatrace-batch-http-poc); on CloudHub 2.0 add a `domain`
+             application property (e.g. dynatrace-batch-http). Unset (locally) it falls back to
+             this app's own name. Same delete-don't-clear rule as app.platform below: a
+             present-but-empty `domain` resolves to "" and blanks the attribute. -->
+        <Property name="dt.source">${sys:domain:-dynatrace-batch-http}</Property>
+        <!-- Deployment-platform facet, emitted by the vendor layout below (see there). The same
+             app ships from BOTH CloudHub 1.0 and CloudHub 2.0. Set it per deployment with
+             -Dapp.platform=cloudhub-1.0 or APP_PLATFORM=cloudhub-2.0; unset it reads
+             `unspecified`. If you stop wanting an override, DELETE the property — do NOT clear
+             it: Log4j2 substitutes a ${sys:x:-default} default only when the property is ABSENT,
+             so a present-but-empty value resolves to "" and silently blanks the field. Set it on
+             BOTH apps of the pair. -->
+        <Property name="app.platform">${sys:app.platform:-${env:APP_PLATFORM:-unspecified}}</Property>
+        <!-- Dynatrace environment URL. The chain is DELIBERATELY IDENTICAL in the stock sibling
+             (dynatrace-stock-http): an A/B pair whose halves shipped to different environments
+             would not be a comparison. -->
+        <Property name="dt.url">${sys:DT_ENVIRONMENT_URL:-${sys:dynatrace.url:-${env:DT_ENVIRONMENT_URL:-https://set-dynatrace-url.invalid}}}</Property>
+    </Properties>
+    <Appenders>
+        <!-- CloudHub 1.0 custom log appender — the FILE appender reproduced EXACTLY as
+             documented at https://docs.mulesoft.com/cloudhub/custom-log-appender so the
+             CloudHub 1.0 log collector (and MuleSoft Support) can pick these files up. The
+             path convention /opt/mule/mule-CURRENT/logs/mule-${sys:domain}.log is mandatory;
+             ${sys:domain} resolves to the CloudHub application name at runtime.
+             The message (%m) is a pretty-printed, multi-line JSON object emitted by the flow —
+             kept human-readable here. The vendor appender single-lines the SAME %m (see below).
+             (Log4j2 auto-appends any stack trace.) -->
+        <RollingFile name="FILE"
+                     fileName="/opt/mule/mule-CURRENT/logs/mule-${sys:domain}.log"
+                     filePattern="/opt/mule/mule-CURRENT/logs/mule-${sys:domain}-%i.log">
+            <PatternLayout pattern="[%d{MM-dd HH:mm:ss.SSS}] %-5p %c{1} [%t]: %m%n"/>
+            <DefaultRolloverStrategy max="10"/>
+            <Policies>
+                <SizeBasedTriggeringPolicy size="10 MB" />
+            </Policies>
+        </RollingFile>
+        <!-- Batching HTTP appender shipping to the Dynatrace Log Monitoring API v2. The sink
+             appends /api/v2/logs/ingest to `url` (unless it is already there) and POSTs a JSON
+             array, authenticated with `Authorization: Api-Token <token>`. Each record becomes one
+             log object: the reserved content, loglevel and timestamp (ISO-8601 UTC), plus
+             logger.name, thread.name, log.source, error.stack, and every MDC entry as a top-level
+             attribute (Mule sets correlationId and processorPath). Dynatrace answers 204 when it
+             took the whole array. `token` is the documented attribute; `apiKey` is accepted as
+             an alias. -->
+        <BatchHttp name="dynatrace"
+                   vendor="dynatrace"
+                   url="${dt.url}"
+                   token="${sys:DT_API_TOKEN:-${sys:dynatrace.token:-${env:DT_API_TOKEN:-MISSING_TOKEN}}}"
+                   source="${dt.source}"
+                   maxBatchRecords="200"
+                   maxBatchBytes="900000"
+                   lingerMillis="2000"
+                   queueCapacity="25000"
+                   overflowPolicy="DROP_NEWEST"
+                   gzip="false"
+                   maxRetries="3"
+                   requestTimeoutMillis="10000"
+                   shutdownDrainTimeoutMillis="5000"
+                   flusherThreads="1"
+                   includeStackTrace="true"
+                   diagnosticsLevel="INFO"
+                   statsIntervalMillis="60000"
+                   spillEnabled="${sys:batch.spillEnabled:-true}"
+                   spillInstanceId="dynatrace-batch-http"
+                   spillReplayIntervalMillis="10000"
+                   maxSpillFileBytes="16777216"
+                   maxTotalSpillBytes="536870912"
+                   minFreeDiskBytes="268435456"
+                   spillOnOverflow="true"
+                   spillFormat="BINARY"
+                   spillRecoveryMode="ADOPT"
+                   spillStartupReconcile="true"
+                   spillBacklogOrder="DUAL_STREAM"
+                   spillReplayThreads="2"
+                   spillReplayMaxBytesPerSec="0">
+            <!-- Compression above — a DELIBERATE divergence from the library default:
+                   gzip               the library defaults this to TRUE, which is the right
+                                      production setting; this app overrides it to FALSE on
+                                      purpose. The stock <Http> appender in the A/B sibling
+                                      (dynatrace-stock-http) has no compression option at all, so
+                                      leaving gzip on would vary two things at once — batching
+                                      AND compression. A real deployment should leave
+                                      compression on (simply omit the attribute). -->
+            <!-- Disk spill above — ON, the library default:
+                   spillEnabled       ${sys:batch.spillEnabled:-true}. Queue overflow and batches
+                                      that fail every retry go to disk and replay when the intake
+                                      catches up. The segments live in the JVM temp dir (/tmp), so
+                                      a backlog survives only a restart on the same host: on
+                                      CloudHub a restart onto a new worker (1.0) or pod (2.0)
+                                      loses it. Spill's replay threads and disk I/O share the
+                                      0.1 vCore with request handling: in the 2026-10-12 benchmark
+                                      that cost req/s only where the queue overflowed the whole
+                                      time (New Relic on CloudHub 1.0 in the churn test), and
+                                      nothing measurable in the 5-minute tests. Set the property
+                                      batch.spillEnabled=false to measure batching alone (overflow
+                                      then reverts to dropping per overflowPolicy, and the overload
+                                      signal becomes `dropped`). With spill on the overload signal
+                                      is `spilledRecords` in the stats heartbeat; records the full
+                                      spill buffer refuses or evicts are counted in
+                                      spillStats().droppedRecords, not in `dropped`. -->
+            <!-- Queue sizing above:
+                   queueCapacity      25000 (about 50 MB at ~2 KB retained per record) — tens of
+                                      seconds of buffer at the rates this app sustains. With
+                                      spill off it is also the whole buffer. -->
+            <!-- Diagnostics knobs above:
+                   diagnosticsLevel    floor for the appender's OWN health messages, written to
+                                       Log4j2's StatusLogger (out-of-band, never re-shipped).
+                                       INFO = failures plus the periodic stats heartbeat.
+                   statsIntervalMillis a one-line delivery snapshot every 60 s
+                                       (accepted/sent/dropped/failed/queueDepth). -->
+            <!-- Crash-resilience knobs above — active while spill is on; every one of them
+                 is inert when batch.spillEnabled=false. Kept so re-enabling durability is a one-word edit; see the Datadog demo's
+                 log4j2.xml for what each one does. -->
+            <!-- Timestamp: the Dynatrace sink always sends the event time as the reserved
+                 `timestamp` attribute (ISO-8601 UTC) and ignores includeTimestamp. The stock
+                 sibling's layout stamps the same attribute the same way. -->
+            <!-- Vendor layout: prepend the `platform` facet, then collapse the flow's pretty JSON
+                 to ONE line. The leading brace re-opens the object whose own brace %replace
+                 strips (\x7B, hex-escaped so Log4j2's %replace brace-counting does not
+                 miscount). The result is the log record's `content` — a single-line JSON string.
+                 Dynatrace stores it as text; lifting `event`, `orderId` and friends out of it is
+                 an optional OpenPipeline processing rule (see the README), which then applies to
+                 both apps of the pair alike. The stock sibling builds the byte-identical
+                 `content` string, so the two records match attribute for attribute. -->
+            <PatternLayout pattern="{&quot;platform&quot;:&quot;${app.platform}&quot;,%replace{%m}{^\x7B\s*|[\r\n]+\s*}{}"/>
+        </BatchHttp>
+    </Appenders>
+
+    <!-- Logger layout mirrors the CloudHub 1.0 reference at
+         https://docs.mulesoft.com/cloudhub/custom-log-appender : an async root
+         (CloudHub requires async appenders) plus the same framework noise-reduction
+         categories the doc ships. The one demo-specific addition is the application
+         logger below, which ALSO ships to the Dynatrace appender. -->
+    <Loggers>
+        <!-- Application logs: ship to Dynatrace AND the local file. -->
+        <AsyncLogger name="com.mulesoft.support.batchhttp.muledemo" level="INFO" additivity="false">
+            <AppenderRef ref="dynatrace"/>
+            <AppenderRef ref="FILE"/>
+        </AsyncLogger>
+
+        <!-- Framework noise-reduction categories, copied from the CloudHub doc. -->
+        <AsyncLogger name="com.gigaspaces" level="ERROR"/>
+        <AsyncLogger name="com.j_spaces" level="ERROR"/>
+        <AsyncLogger name="com.sun.jini" level="ERROR"/>
+        <AsyncLogger name="net.jini" level="ERROR"/>
+        <AsyncLogger name="org.apache" level="WARN"/>
+        <AsyncLogger name="org.apache.cxf" level="WARN"/>
+        <AsyncLogger name="org.springframework.beans.factory" level="WARN"/>
+        <AsyncLogger name="org.mule" level="INFO"/>
+        <AsyncLogger name="com.mulesoft" level="INFO"/>
+        <AsyncLogger name="org.jetel" level="WARN"/>
+        <AsyncLogger name="Tracking" level="WARN"/>
+
+        <!-- Root carries the FILE appender ONLY: framework logs keep landing in the CloudHub
+             log file but are not shipped. The vendor layout wraps the flow's own JSON message,
+             so a plain-text framework line would render as a malformed `content`. -->
+        <AsyncRoot level="INFO">
+            <AppenderRef ref="FILE"/>
+        </AsyncRoot>
+    </Loggers>
+</Configuration>

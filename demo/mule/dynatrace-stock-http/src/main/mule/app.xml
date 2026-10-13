@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd">
+
+    <!--
+      IDENTICAL workload to mule-dynatrace-demo's app.xml. Keeping the flow byte-for-byte
+      equivalent (same log lines, same MDC, same levels, same count semantics) is what
+      makes the A/B honest: only the appender behind Log4j2 differs. The one difference
+      is http.port (8088 vs 8087) so both apps can run at the same time.
+    -->
+
+    <configuration-properties file="config.properties"/>
+
+    <http:listener-config name="httpListenerConfig">
+        <http:listener-connection host="0.0.0.0" port="${http.port}"/>
+    </http:listener-config>
+
+    <!--
+      GET /log?count=N&level=info
+      Emits N log events at the requested level. These flow through Log4j2 into the
+      STOCK <Http> appender, which makes one synchronous POST per event to Dynatrace.
+    -->
+    <flow name="generate-logs-flow">
+        <http:listener config-ref="httpListenerConfig" path="/log"/>
+
+        <set-variable variableName="count"
+                      value="#[if (attributes.queryParams.count?) ((attributes.queryParams.count) as Number) else 50]"/>
+        <set-variable variableName="level"
+                      value="#[attributes.queryParams.level default 'info']"/>
+
+        <!-- Every log message below opens with "generatedAt": when the business event occurred,
+             emitted HERE rather than by the Log4j2 layout so it is independent of the appender
+             and byte-identical to the batch sibling's expression. now() carries the local offset,
+             so it is shifted to UTC (>> |Z|) before formatting; the format is explicit because
+             DataWeave's default renders microseconds and a numeric offset, and .SSS always pads
+             to three digits.
+
+             Put a correlation id into MDC; the stock appender can surface MDC via its
+             layout pattern (%X). -->
+        <logger level="INFO"
+                message="#['{\n  &quot;generatedAt&quot;: &quot;' ++ ((now() >> |Z|) as String {format: &quot;yyyy-MM-dd'T'HH:mm:ss.SSS'Z'&quot;}) ++ '&quot;,\n  &quot;event&quot;: &quot;batch.start&quot;,\n  &quot;orderId&quot;: &quot;' ++ uuid() ++ '&quot;,\n  &quot;level&quot;: &quot;' ++ vars.level ++ '&quot;,\n  &quot;plannedEvents&quot;: ' ++ (vars.count as String) ++ ',\n  &quot;region&quot;: &quot;region-a&quot;,\n  &quot;source&quot;: &quot;mule&quot;,\n  &quot;phase&quot;: &quot;ingest&quot;,\n  &quot;note&quot;: &quot;beginning synthetic batch to compare batch vs stock log appender throughput&quot;\n}']"
+                category="com.mulesoft.support.batchhttp.muledemo"/>
+
+        <foreach collection="#[1 to vars.count]">
+            <logger level="INFO"
+                    message="#['{\n  &quot;generatedAt&quot;: &quot;' ++ ((now() >> |Z|) as String {format: &quot;yyyy-MM-dd'T'HH:mm:ss.SSS'Z'&quot;}) ++ '&quot;,\n  &quot;event&quot;: &quot;order.processed&quot;,\n  &quot;orderId&quot;: &quot;' ++ uuid() ++ '&quot;,\n  &quot;sequence&quot;: ' ++ (payload as String) ++ ',\n  &quot;of&quot;: ' ++ (vars.count as String) ++ ',\n  &quot;level&quot;: &quot;info&quot;,\n  &quot;region&quot;: &quot;region-a&quot;,\n  &quot;source&quot;: &quot;mule&quot;,\n  &quot;customer&quot;: &quot;' ++ 'cust-' ++ (payload as String) ++ '&quot;,\n  &quot;amount&quot;: ' ++ ((payload * 19.95) as String) ++ ',\n  &quot;currency&quot;: &quot;USD&quot;,\n  &quot;orderStatus&quot;: &quot;SHIPPED&quot;,\n  &quot;warehouse&quot;: &quot;wh-a-03&quot;,\n  &quot;carrier&quot;: &quot;expedited-air&quot;,\n  &quot;note&quot;: &quot;synthetic order event emitted to exercise the log pipeline end to end&quot;\n}']"
+                    category="com.mulesoft.support.batchhttp.muledemo"/>
+        </foreach>
+
+        <logger level="WARN"
+                message="#['{\n  &quot;generatedAt&quot;: &quot;' ++ ((now() >> |Z|) as String {format: &quot;yyyy-MM-dd'T'HH:mm:ss.SSS'Z'&quot;}) ++ '&quot;,\n  &quot;event&quot;: &quot;batch.completed&quot;,\n  &quot;orderId&quot;: &quot;' ++ uuid() ++ '&quot;,\n  &quot;emittedEvents&quot;: ' ++ (vars.count as String) ++ ',\n  &quot;level&quot;: &quot;warn&quot;,\n  &quot;region&quot;: &quot;region-a&quot;,\n  &quot;source&quot;: &quot;mule&quot;,\n  &quot;phase&quot;: &quot;complete&quot;,\n  &quot;note&quot;: &quot;sample warning emitted after the batch to exercise level routing through the appender&quot;\n}']"
+                category="com.mulesoft.support.batchhttp.muledemo"/>
+
+        <set-payload value="#['Emitted ' ++ (vars.count as String) ++ ' log events via the STOCK HttpAppender. Check the Dynatrace Logs app.']"/>
+    </flow>
+
+    <!-- GET /boom : raise an error and log it at ERROR level, to verify that ERROR-level
+         events route through the vendor appender. Mule's <logger> logs a string and
+         attaches no Java throwable, so the appender's includeStackTrace path is NOT
+         exercised here; the error's type and description travel as flow JSON fields. -->
+    <flow name="error-log-flow">
+        <http:listener config-ref="httpListenerConfig" path="/boom"/>
+        <try>
+            <flow-ref name="raise-error-subflow"/>
+            <error-handler>
+                <on-error-continue>
+                    <logger level="ERROR"
+                            message="#['{\n  &quot;generatedAt&quot;: &quot;' ++ ((now() >> |Z|) as String {format: &quot;yyyy-MM-dd'T'HH:mm:ss.SSS'Z'&quot;}) ++ '&quot;,\n  &quot;event&quot;: &quot;order.failed&quot;,\n  &quot;orderId&quot;: &quot;' ++ uuid() ++ '&quot;,\n  &quot;level&quot;: &quot;error&quot;,\n  &quot;region&quot;: &quot;region-a&quot;,\n  &quot;source&quot;: &quot;mule&quot;,\n  &quot;phase&quot;: &quot;error&quot;,\n  &quot;errorType&quot;: &quot;' ++ (error.errorType.identifier default 'UNKNOWN') ++ '&quot;,\n  &quot;reason&quot;: &quot;' ++ (error.description default 'unknown') ++ '&quot;,\n  &quot;note&quot;: &quot;synthetic failure raised to verify exception and stack-trace shipping&quot;\n}']"
+                            category="com.mulesoft.support.batchhttp.muledemo"/>
+                    <set-payload value="logged an error with stack trace"/>
+                </on-error-continue>
+            </error-handler>
+        </try>
+    </flow>
+
+    <sub-flow name="raise-error-subflow">
+        <raise-error type="APP:DEMO_FAILURE" description="synthetic failure for log shipping demo"/>
+    </sub-flow>
+
+</mule>

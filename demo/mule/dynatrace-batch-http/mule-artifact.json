@@ -1,0 +1,15 @@
+{
+  "minMuleVersion": "4.9.15",
+  "name": "mule-dynatrace-demo",
+  "requiredProduct": "MULE_EE",
+  "configs": [
+    "app.xml"
+  ],
+  "javaSpecificationVersions": [
+    "17"
+  ],
+  "secureProperties": [
+    "DT_API_TOKEN",
+    "dynatrace.token"
+  ]
+}

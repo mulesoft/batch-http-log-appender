@@ -375,7 +375,7 @@ Logs UI parses a JSON `message` and shows nothing without one. Within a pair the
 identical, which is what the A/B needs. `datadog-batch-http` (port
 8083) uses `<BatchHttp vendor="datadog">`; its stock-`<Http>` control sibling
 `datadog-stock-http` (port 8084) sends one POST per event. Every Mule demo
-uses a distinct port (8081–8086) so they can all run at once. See each module's README for
+uses a distinct port (8081–8088) so they can all run at once. See each module's README for
 build, key injection (`DD_API_KEY` / `-Ddatadog.apiKey`), and the A/B measurement guide.
 
 #### Elasticsearch flavor of the same pair
@@ -388,6 +388,19 @@ posts one document per event to `/<data-stream>/_doc`, and its layout spells out
 ECS document, so the stored documents differ only in `service.name`. Both read the endpoint
 from the `elastic.url` property and the API key from the secure `elastic.apiKey` property. See each module's README for the
 API key privileges and the optional ingest pipeline that parses the JSON inside `message`.
+
+#### Dynatrace flavor of the same pair
+
+`demo/mule/dynatrace-batch-http` (port 8087) and `demo/mule/dynatrace-stock-http` (port 8088) are
+the **Dynatrace counterparts** of the Elasticsearch pair: the same flow and workload, shipping to
+the Log Monitoring API v2 (`/api/v2/logs/ingest`). The batch app uses
+`<BatchHttp vendor="dynatrace">`, which posts a JSON array per batch. Its stock-`<Http>` sibling
+posts one log object per event, and its layout spells out the same attributes the sink sends, so
+the stored records differ only in `log.source` — the CloudHub application name
+(`${sys:domain}`; on CloudHub 2.0 set a `domain` application property). Both read the environment
+URL from the `dynatrace.url` property and an access token with only the `logs.ingest` scope from
+the secure `dynatrace.token` property. See each module's README for finding and counting the
+records with DQL.
 
 #### Splitting CloudHub 1.0 from CloudHub 2.0
 
@@ -411,7 +424,7 @@ convenience, not a library feature: a `<Properties>` entry plus one field in eac
 `<PatternLayout>`, which is the one mechanism `<BatchHttp>` and the stock `<Http>` appender share.
 
 **The scripted CloudHub 1.0 deploy does not set this facet.** `scripts/deploy-ch1.sh` passes
-only the vendor credential (for the Elasticsearch pair, also `elastic.url`) as `--property`, so an app deployed through it reports
+only the vendor credential (for the Elasticsearch and Dynatrace pairs, also `elastic.url` / `dynatrace.url`) as `--property`, so an app deployed through it reports
 `platform: unspecified` until you add `app.platform` by hand in the Runtime Manager **Properties**
 tab (CloudHub 1.0 surfaces those as JVM system properties) and restart. Do that for both halves of
 the pair before a benchmark run, or the CH1 side of the comparison arrives unlabelled.
