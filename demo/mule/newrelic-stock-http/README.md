@@ -30,7 +30,7 @@ pair does not also differ by compression, and keeps disk spill on, the library d
 
 ## Layout
 
-```
+```text
 newrelic-stock-http/
 ├── pom.xml                          mule-application packaging; NO appender dependency
 ├── mule-artifact.json               minMuleVersion 4.9.15
@@ -57,7 +57,7 @@ Produces `target/mule-newrelic-stock-http-demo-1.0.0-SNAPSHOT-mule-application.j
 `log4j2.xml` is parsed by **Log4j2**, not Mule, so the key is injected via a Log4j2
 lookup (same chain as the batch sibling):
 
-```
+```text
 Api-Key = ${sys:NEW_RELIC_API_KEY:-${sys:newrelic.apiKey:-${env:NEW_RELIC_API_KEY:-MISSING_KEY}}}
 ```
 

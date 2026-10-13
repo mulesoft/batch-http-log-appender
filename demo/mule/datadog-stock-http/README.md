@@ -30,7 +30,7 @@ compression, and keeps disk spill on, the library default.
 
 ## Layout
 
-```
+```text
 datadog-stock-http/
 ├── pom.xml                          mule-application packaging; NO appender dependency
 ├── mule-artifact.json               minMuleVersion 4.9.15
@@ -57,7 +57,7 @@ Produces `target/mule-datadog-stock-http-demo-1.0.0-SNAPSHOT-mule-application.ja
 `log4j2.xml` is parsed by **Log4j2**, not Mule, so the key is injected via a Log4j2
 lookup (same chain as the batch sibling):
 
-```
+```text
 DD-API-KEY = ${sys:DD_API_KEY:-${sys:datadog.apiKey:-${env:DD_API_KEY:-MISSING_KEY}}}
 ```
 

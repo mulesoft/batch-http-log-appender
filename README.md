@@ -14,11 +14,17 @@ On this page: [Why](#why) · [Supported vendors](#supported-vendors) · [Quick s
 - At volume, per-request overhead (TLS, headers, round-trip latency) dominates.
 - Vendor intake APIs are all designed for bulk ingest, and this library uses them: events are
   enqueued (non-blocking) and shipped in compressed batches by background threads.
-- **About 400× faster wall-clock, 500× fewer requests** against a local mock intake (5 ms
-  simulated latency per request, 5000 events): the stock path took 32634 ms and 5000 requests,
-  the batching appender 82 ms and 10 requests. Method and command:
-  [Run the benchmark / example](docs/building.md#run-the-benchmark--example). On real vendor
-  intakes from CloudHub, see [Benchmarks](#benchmarks).
+
+<a id="benchmark-local-mock-intake-5-ms-simulated-latencyrequest-5000-events"></a>
+**Local benchmark:** 5,000 log events sent to a mock intake that adds 5 ms of latency per request.
+
+| | Stock `HttpAppender` | Batch appender | Difference |
+|---|---:|---:|---|
+| Wall clock | 32,634 ms | **82 ms** | about **400× faster** |
+| HTTP requests | 5,000 | **10** | **500× fewer** |
+
+[Run it yourself](docs/building.md#run-the-benchmark--example) · Results on real vendor intakes
+from CloudHub: [Benchmarks](#benchmarks)
 
 ## Supported vendors
 

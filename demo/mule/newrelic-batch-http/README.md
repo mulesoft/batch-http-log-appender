@@ -12,7 +12,7 @@ Its stock-`HttpAppender` control sibling — for measuring the impact of batchin
 
 ## Layout
 
-```
+```text
 newrelic-batch-http/
 ├── pom.xml                          mule-application packaging; depends on batch-http-log4j2
 ├── mule-artifact.json               minMuleVersion 4.9.15
@@ -37,7 +37,7 @@ mvn install -DskipTests
 resolve there. The key is injected via a Log4j2 lookup that prefers a JVM system
 property and falls back to an environment variable:
 
-```
+```text
 apiKey="${sys:NEW_RELIC_API_KEY:-${sys:newrelic.apiKey:-${env:NEW_RELIC_API_KEY:-MISSING_KEY}}}"
 ```
 
@@ -299,7 +299,7 @@ README for the full reference):
 
 Segment files for this demo live under:
 
-```
+```text
 /tmp/batch-http-spill/NewRelic/      # %TEMP%\batch-http-spill\NewRelic\ on Windows
 ```
 

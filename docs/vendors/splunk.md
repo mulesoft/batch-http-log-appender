@@ -53,8 +53,8 @@ Platform has the same HEC token settings.
 > An ack-enabled token requires an `X-Splunk-Request-Channel` header, which this appender does
 > not send. Such a token rejects every batch with HTTP 400.
 
-Splunk Cloud presents publicly trusted certificates. For a self-signed Splunk Enterprise HEC
-certificate, first import it into the JVM trust store. Only for an internal collector where that
+If the JVM does not trust the HEC certificate (for example a self-signed Splunk Enterprise HEC
+certificate), first import it into the JVM trust store. Only for an internal collector where that
 is not possible, use [`trustAllCertificates`](../configuration.md#opt-trustallcertificates), and
 [`verifyHostName`](../configuration.md#opt-verifyhostname)`="false"` if the name does not match;
 turning off hostname verification affects the whole JVM (see the
