@@ -98,19 +98,26 @@ Notes on the CVE gate:
 
 ## Local benchmark
 
-`BenchmarkDemo` sends the same 5,000 log events twice to a local mock intake that adds 5 ms of
-latency to every request:
+`BenchmarkDemo` sends the same 5,000 log events twice to a mock intake on the same machine. The
+intake takes 5 ms to answer each request.
 
-1. **Stock path:** one synchronous HTTP request per event, which is what Log4j2's built-in
-   `HttpAppender` does.
-2. **Batch path:** the same events through this appender's batching engine.
+1. **Stock path:** one blocking HTTP request per event on the calling thread, which mimics what
+   Log4j2's built-in `HttpAppender` does.
+2. **Batch path:** the same events through this appender's batching engine. The demo sets
+   `maxBatchRecords` to 500; with the default of 200 it would send about 25 requests.
 
 A representative result:
 
-| | Stock `HttpAppender` | Batch appender | Difference |
-|---|---:|---:|---|
-| Wall clock | 32,634 ms | **82 ms** | about **400× faster** |
-| HTTP requests | 5,000 | **10** | **500× fewer** |
+| | Stock `HttpAppender` style | Batch appender |
+|---|---|---|
+| How it sends | One request per event, waits for each answer | 500 events per request, from a background thread |
+| HTTP requests | 5,000 | 10 (**500× fewer**) |
+| Time to deliver all 5,000 events | 32.6 s | 0.08 s (**about 400× faster**) |
+| Your thread while logging | Blocked on every request | Continues immediately |
+
+The batch time includes `close()`, which waits until every queued event has been sent, so both
+columns measure full delivery. This is the best case by design: the mock answers in exactly 5 ms
+whatever the batch size. On real networks the gain depends on how far away the intake is.
 
 ### Run it
 
