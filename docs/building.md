@@ -10,7 +10,7 @@ On this page:
 - [Build & install locally](#build--install-locally)
 - [Verify the build](#verify-the-build)
 - [Dependency hygiene & CVE scanning](#dependency-hygiene--cve-scanning)
-- [Run the benchmark / example](#run-the-benchmark--example)
+- [Local benchmark](#local-benchmark)
 
 ## Build & install locally
 
@@ -94,33 +94,43 @@ Notes on the CVE gate:
 > Stay on the **log4j 2.x** line. A 3.x bump would diverge from the log4j the Mule runtime
 > actually supplies.
 
-## Run the benchmark / example
+<a id="run-the-benchmark--example"></a>
+
+## Local benchmark
+
+`BenchmarkDemo` sends the same 5,000 log events twice to a local mock intake that adds 5 ms of
+latency to every request:
+
+1. **Stock path:** one synchronous HTTP request per event, which is what Log4j2's built-in
+   `HttpAppender` does.
+2. **Batch path:** the same events through this appender's batching engine.
+
+A representative result:
+
+| | Stock `HttpAppender` | Batch appender | Difference |
+|---|---:|---:|---|
+| Wall clock | 32,634 ms | **82 ms** | about **400× faster** |
+| HTTP requests | 5,000 | **10** | **500× fewer** |
+
+### Run it
 
 ```bash
 mvn install -DskipTests
 cd demo/java/benchmark && mvn exec:java
 ```
 
-This runs `BenchmarkDemo` against a local mock intake that adds a simulated 5 ms of latency per
-request. It ships 5000 events twice:
+Expect it to take about half a minute: the stock path alone needs roughly 33 seconds.
 
-- once "naive": one synchronous HTTP request per event, what the stock Log4j2 `HttpAppender` does;
-- once through the batching engine.
-
-A representative result:
-
-| | Stock `HttpAppender` (naive) | Batch appender | Difference |
-|---|---:|---:|---|
-| Wall clock | 32,634 ms | **82 ms** | about **400× faster** |
-| HTTP requests | 5,000 | **10** | **500× fewer** |
+### Example configuration for every vendor
 
 The same module carries `src/main/resources/log4j2-example.xml`, an example configuration with a
 `<BatchHttp>` appender for every vendor. It is the starting point for [Splunk](vendors/splunk.md)
 and the [generic sink](vendors/generic.md), which have no sample Mule project.
 
-For measurements against real vendor intakes on CloudHub, see the
-[benchmark results](benchmark-results.md) and the reproduction guide in the
-[benchmark runbook](benchmark-runbook.md).
+> [!NOTE]
+> This is a local, synthetic measurement. For results against real vendor intakes on CloudHub,
+> see the [benchmark results](benchmark-results.md); the [benchmark runbook](benchmark-runbook.md)
+> explains how to reproduce them.
 
 ## See also
 
