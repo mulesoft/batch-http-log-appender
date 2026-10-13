@@ -13,7 +13,7 @@ stock-`HttpAppender` control sibling — for measuring the impact of batching �
 
 ## Layout
 
-```
+```text
 datadog-batch-http/
 ├── pom.xml                          mule-application packaging; depends on batch-http-log4j2
 ├── mule-artifact.json               minMuleVersion 4.9.15
@@ -38,7 +38,7 @@ mvn install -DskipTests
 resolve there. The key is injected via a Log4j2 lookup that prefers a JVM system
 property and falls back to an environment variable:
 
-```
+```text
 apiKey="${sys:DD_API_KEY:-${sys:datadog.apiKey:-${env:DD_API_KEY:-MISSING_KEY}}}"
 ```
 

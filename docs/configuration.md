@@ -528,7 +528,7 @@ are listed here.
 
 By default the HTTPS transport does what a browser does: it validates the server's certificate
 chain against the JVM trust store and checks that the host name matches the certificate. Leave
-that on for every real vendor intake, which all present publicly trusted certificates.
+that on for every vendor intake whose certificate the JVM trusts.
 
 The two attributes above are escape hatches for a private collector you control that presents a
 self-signed or privately signed certificate, analogous to `curl -k` and to Log4j2's own

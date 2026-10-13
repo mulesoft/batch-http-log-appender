@@ -1157,13 +1157,12 @@ together — two copies of the same app ship to the same vendor intake, which is
 
 ## 11. The CloudHub 2.0 result — reproduce or correct?
 
-> [!NOTE]
-> **This section is retrospective.** It audits the **superseded July** Datadog figures, and it is
-> kept because it is the record of *why* the protocol in §7 holds every parameter identical across
-> the planes. The re-run has since happened under that protocol and is what
-> [`benchmark-results.md`](benchmark-results.md) and [`index.html`](index.html) now publish. Read
-> the numbers below as history, not as current results, and re-run the same reasoning against
-> your own figures rather than carrying these conclusions forward.
+**This section is retrospective.** It audits the **superseded July** Datadog figures, and it is
+kept because it is the record of *why* the protocol in §7 holds every parameter identical across
+the planes. The re-run has since happened under that protocol and is what
+[`benchmark-results.md`](benchmark-results.md) and [`index.html`](index.html) now publish. Read
+the numbers below as history, not as current results, and re-run the same reasoning against
+your own figures rather than carrying these conclusions forward.
 
 The July CloudHub 2.0 batch throughput (12.75 req/s) against CloudHub 1.0's (73.18) was the number
 most likely to be challenged, and the question was whether a re-run should reproduce or correct it.
