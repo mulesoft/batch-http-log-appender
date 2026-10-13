@@ -16,17 +16,15 @@ WORKER_SIZE=0.1
 RUNTIME=4.9.15
 JAVA_VERSION=17
 
-# The original benchmark drove CloudHub 1.0 over plain http and CloudHub 2.0 over https, so the
-# two planes were never measured over the same transport. The published protocol equalises on
-# plain http for both planes (README.md, docs/index.html).
+# Scheme for the printed CloudHub 1.0 load URLs. The published protocol (docs/benchmark-results.md)
+# drives CloudHub 1.0 over plain http and CloudHub 2.0 over https.
 SCHEME=${SCHEME:-http}
 
-# Load parameters the published protocol uses on BOTH planes, identical on each: 5 concurrent
-# connections against /log?count=15, i.e. 17 log events per request. Printed at the end so the
-# two halves of the benchmark cannot drift apart again -- driving each plane with different
-# parameters is what made the original run's two platform tables incomparable.
-LOAD_CONC=${LOAD_CONC:-5}
-LOAD_COUNT=${LOAD_COUNT:-15}
+# CloudHub 1.0 load parameters of the published protocol: 10 concurrent connections against
+# /log?count=20, i.e. 22 log events per request (CloudHub 2.0 runs the same count= at -c 5 over
+# https). Printed at the end so a re-run uses the published parameters.
+LOAD_CONC=${LOAD_CONC:-10}
+LOAD_COUNT=${LOAD_COUNT:-20}
 
 # How long to wait for an app to reach STARTED, and how often to re-check.
 START_TIMEOUT_SECONDS=${START_TIMEOUT_SECONDS:-900}
@@ -44,10 +42,11 @@ SUFFIX=${CH1_APP_SUFFIX:-}
 DATADOG_APPS=("datadog-batch-http$SUFFIX" "datadog-stock-http$SUFFIX")
 NEWRELIC_APPS=("newrelic-batch-http$SUFFIX" "newrelic-stock-http$SUFFIX")
 ELASTIC_APPS=("elastic-batch-http$SUFFIX" "elastic-stock-http$SUFFIX")
+DYNATRACE_APPS=("dynatrace-batch-http$SUFFIX" "dynatrace-stock-http$SUFFIX")
 
 usage() {
   cat <<'EOF'
-Usage: scripts/deploy-ch1.sh [--dry-run] [--datadog | --newrelic | --elastic | --all] [APP ...]
+Usage: scripts/deploy-ch1.sh [--dry-run] [--datadog | --newrelic | --elastic | --dynatrace | --all] [APP ...]
 
 Deploys (or redeploys) the CloudHub 1.0 benchmark applications per docs/benchmark-runbook.md §4.
 
@@ -55,7 +54,8 @@ App names are the demo module names plus $CH1_APP_SUFFIX. On CloudHub 1.0 the ap
 public hostname label, so targeting the wrong name deploys a parallel app instead of redeploying
 the existing one -- set CH1_APP_SUFFIX to whatever the already-deployed apps use.
 
-Only the vendor credential is passed as a --property (plus elastic.url for an elastic-* app). Set app.platform=cloudhub-1.0 by hand in
+Only the vendor credential is passed as a --property (plus elastic.url for an elastic-* app and
+dynatrace.url for a dynatrace-* app). Set app.platform=cloudhub-1.0 by hand in
 Runtime Manager's Properties tab, or the events arrive labelled platform: unspecified and the
 two planes are indistinguishable at the vendor.
 
@@ -63,7 +63,8 @@ Selection (default: the Datadog pair):
   --datadog          datadog-batch-http$SUFFIX  datadog-stock-http$SUFFIX   (default)
   --newrelic         newrelic-batch-http$SUFFIX newrelic-stock-http$SUFFIX
   --elastic          elastic-batch-http$SUFFIX  elastic-stock-http$SUFFIX
-  --all              the Datadog and New Relic pairs (the published benchmark)
+  --dynatrace        dynatrace-batch-http$SUFFIX dynatrace-stock-http$SUFFIX
+  --all              the Datadog and New Relic pairs
   APP ...            explicit app names, overriding the flags above
                      (or set APPS="datadog-batch-http-x datadog-stock-http-x" in the environment)
 
@@ -81,12 +82,14 @@ Required environment:
   NR_KEY                   New Relic ingest key (required when deploying a newrelic-* app)
   ELASTIC_URL              Elasticsearch endpoint (required when deploying an elastic-* app)
   ELASTIC_KEY              Elasticsearch encoded API key (required when deploying an elastic-* app)
+  DT_ENVIRONMENT_URL       Dynatrace environment URL (required when deploying a dynatrace-* app)
+  DT_API_TOKEN             Dynatrace access token, logs.ingest scope only (required when deploying a dynatrace-* app)
 
 Optional environment:
   CH1_APP_SUFFIX           suffix the deployed CloudHub 1.0 apps carry; default empty
-  SCHEME                   scheme for the printed load URLs, default http (both planes)
-  LOAD_CONC                oha -c value printed in the summary, default 5
-  LOAD_COUNT               /log?count= value printed in the summary, default 15 (17 log events)
+  SCHEME                   scheme for the printed load URLs, default http (CloudHub 1.0)
+  LOAD_CONC                oha -c value printed in the summary, default 10 (CloudHub 1.0)
+  LOAD_COUNT               /log?count= value printed in the summary, default 20 (22 log events)
   START_TIMEOUT_SECONDS    default 900
   POLL_INTERVAL_SECONDS    default 15
   ANYPOINT_CLI             CLI executable, default anypoint-cli-v4
@@ -115,6 +118,7 @@ while [ $# -gt 0 ]; do
     --datadog)  selection=datadog ;;
     --newrelic) selection=newrelic ;;
     --elastic)  selection=elastic ;;
+    --dynatrace) selection=dynatrace ;;
     --all)      selection=all ;;
     -h|--help)  usage; exit 0 ;;
     -*)         usage >&2; die "unknown option: $1" ;;
@@ -132,6 +136,7 @@ else
   case "$selection" in
     newrelic) APPS_TO_DEPLOY=("${NEWRELIC_APPS[@]}") ;;
     elastic)  APPS_TO_DEPLOY=("${ELASTIC_APPS[@]}") ;;
+    dynatrace) APPS_TO_DEPLOY=("${DYNATRACE_APPS[@]}") ;;
     all)      APPS_TO_DEPLOY=("${DATADOG_APPS[@]}" "${NEWRELIC_APPS[@]}") ;;
     *)        APPS_TO_DEPLOY=("${DATADOG_APPS[@]}") ;;
   esac
@@ -150,6 +155,8 @@ app_jar() {
     newrelic-stock-http*) printf '%s' "$DEPLOYABLE_DIR/newrelic-stock-http.jar" ;;
     elastic-batch-http*)  printf '%s' "$DEPLOYABLE_DIR/elastic-batch-http.jar" ;;
     elastic-stock-http*)  printf '%s' "$DEPLOYABLE_DIR/elastic-stock-http.jar" ;;
+    dynatrace-batch-http*) printf '%s' "$DEPLOYABLE_DIR/dynatrace-batch-http.jar" ;;
+    dynatrace-stock-http*) printf '%s' "$DEPLOYABLE_DIR/dynatrace-stock-http.jar" ;;
     *) return 1 ;;
   esac
 }
@@ -159,6 +166,7 @@ app_property_name() {
     datadog-*)  printf 'datadog.apiKey' ;;
     newrelic-*) printf 'newrelic.apiKey' ;;
     elastic-*)  printf 'elastic.apiKey' ;;
+    dynatrace-*) printf 'dynatrace.token' ;;
     *) return 1 ;;
   esac
 }
@@ -168,6 +176,7 @@ app_secret() {
     datadog-*)  printf '%s' "${DD_KEY:-}" ;;
     newrelic-*) printf '%s' "${NR_KEY:-}" ;;
     elastic-*)  printf '%s' "${ELASTIC_KEY:-}" ;;
+    dynatrace-*) printf '%s' "${DT_API_TOKEN:-}" ;;
     *) return 1 ;;
   esac
 }
@@ -193,17 +202,20 @@ require_var REGION
 need_dd=0
 need_nr=0
 need_es=0
+need_dt=0
 for app in "${APPS_TO_DEPLOY[@]}"; do
-  app_jar "$app" >/dev/null || die "unknown app '$app' (known: ${DATADOG_APPS[*]} ${NEWRELIC_APPS[*]} ${ELASTIC_APPS[*]})"
+  app_jar "$app" >/dev/null || die "unknown app '$app' (known: ${DATADOG_APPS[*]} ${NEWRELIC_APPS[*]} ${ELASTIC_APPS[*]} ${DYNATRACE_APPS[*]})"
   case "$app" in
     datadog-*)  need_dd=1 ;;
     newrelic-*) need_nr=1 ;;
     elastic-*)  need_es=1 ;;
+    dynatrace-*) need_dt=1 ;;
   esac
 done
 [ "$need_dd" -eq 1 ] && require_var DD_KEY
 [ "$need_nr" -eq 1 ] && require_var NR_KEY
 [ "$need_es" -eq 1 ] && require_var ELASTIC_URL && require_var ELASTIC_KEY
+[ "$need_dt" -eq 1 ] && require_var DT_ENVIRONMENT_URL && require_var DT_API_TOKEN
 
 if [ ${#missing[@]} -gt 0 ]; then
   printf 'ERROR: the following required environment variables are unset or empty:\n' >&2
@@ -306,9 +318,12 @@ deploy_one() {
   jar="$(app_jar "$app")"
   prop="$(app_property_name "$app")"
   secret="$(app_secret "$app")"
-  # Elasticsearch is the one intake with no fixed host: the endpoint is per project.
+  # Elasticsearch and Dynatrace have no fixed intake host: the endpoint is per project /
+  # per environment. (dynatrace-* apps get log.source from ${sys:domain}, which CloudHub 1.0
+  # sets to the app name, so nothing else is needed for identity.)
   case "$app" in
-    elastic-*) extra=(--property "elastic.url:$ELASTIC_URL") ;;
+    elastic-*)   extra=(--property "elastic.url:$ELASTIC_URL") ;;
+    dynatrace-*) extra=(--property "dynatrace.url:$DT_ENVIRONMENT_URL") ;;
   esac
 
   # deploy creates; it errors on an app that already exists. Re-running the benchmark five
@@ -397,6 +412,7 @@ CloudHub 1.0 benchmark deploy (docs/benchmark-runbook.md §4)
   datadog key   : $([ "$need_dd" -eq 1 ] && printf '%s' "$MASK" || printf 'n/a')
   newrelic key  : $([ "$need_nr" -eq 1 ] && printf '%s' "$MASK" || printf 'n/a')
   elastic key   : $([ "$need_es" -eq 1 ] && printf '%s' "$MASK" || printf 'n/a')
+  dynatrace tok : $([ "$need_dt" -eq 1 ] && printf '%s' "$MASK" || printf 'n/a')
   apps          : ${APPS_TO_DEPLOY[*]}
   mode          : $([ "$DRY_RUN" -eq 1 ] && printf 'DRY RUN' || printf 'live')
 
@@ -418,10 +434,9 @@ fi
 printf '\n%-22s %-10s %-16s %-8s %-10s %s\n' APP STATUS REGION VCORES RUNTIME URL
 printf '%s\n' "${SUMMARY[@]}"
 printf '\nAll apps report region %s. Record it in the report per runbook §8.\n' "$REGION"
-printf 'Prime each app with 5 warmup requests and a 10 s pause, then measure:\n'
-printf '  oha --no-tui -z 1m -c %s <url>/log?count=%s\n' "$LOAD_CONC" "$LOAD_COUNT"
-printf 'Run paired-parallel, one vendor per side; never two apps against the same vendor intake.\n'
-printf 'Use the same -c and count= on CloudHub 2.0. Different parameters per plane are what made\n'
-printf 'the two platform tables of the original run incomparable (runbook §11).\n'
+printf 'Restart each app fresh, prime it with 5 warmup requests at count=1 and a 30 s drain, then measure:\n'
+printf '  oha --no-tui -z 5m -c %s <url>/log?count=%s\n' "$LOAD_CONC" "$LOAD_COUNT"
+printf 'Run one app per vendor at a time; never two apps against the same vendor intake.\n'
+printf 'CloudHub 2.0 runs the same count= at -c 5 over https (docs/benchmark-results.md).\n'
 printf 'Validate every result with Little'"'"'s Law before recording it: req/s x avg latency ~ -c,\n'
-printf 'and total run ~ 60s; oha 1.14.0 can print latencies 10x low (runbook §7).\n'
+printf 'and total run ~ the -z duration (300 s for -z 5m); oha 1.14.0 can print latencies 10x low (runbook §7).\n'

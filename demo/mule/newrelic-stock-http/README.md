@@ -128,7 +128,8 @@ fixed latency per request (to simulate intake round-trip) is all you need.
      `log4j2.xml` to address the mock directly with the generic sink instead:
 
      ```xml
-     <BatchHttp name="newrelic" vendor="generic" url="http://localhost:9098/log" …/>
+     <!-- keep the other attributes unchanged -->
+     <BatchHttp name="newrelic" vendor="generic" url="http://localhost:9098/log"/>
      ```
 
      Keep every batching attribute (`maxBatchRecords`, `lingerMillis`, `gzip`, …) as-is —
@@ -290,7 +291,7 @@ latency.
 - **First-request warmup** — discard the first run or send a warmup burst; JIT/connection
   setup skews the first measurement for both apps.
 
-See the repo root README's benchmark table for the standalone (non-Mule) version of this
+See the [local mock-intake benchmark](../../../docs/building.md#run-the-benchmark--example) for the standalone (non-Mule) version of this
 comparison (~400× wall-clock, ~500× fewer requests on a local mock). That harness
 (`demo/java/benchmark`) sets `maxBatchRecords(500)` explicitly, which is why its request
 ratio is ~500× rather than the ~190× these Mule apps show at `200` — the ratio tracks the
