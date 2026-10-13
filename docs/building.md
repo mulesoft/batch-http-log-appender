@@ -109,12 +109,10 @@ request. It ships 5000 events twice:
 
 A representative result:
 
-| Mode | Wall clock | HTTP requests |
-|------|-----------:|--------------:|
-| naive (1 request/event) | 32634 ms | 5000 |
-| **batched (this lib)** | **82 ms** | **10** |
-
-**≈ 400× faster wall-clock, 500× fewer requests.**
+| | Stock `HttpAppender` (naive) | Batch appender | Difference |
+|---|---:|---:|---|
+| Wall clock | 32,634 ms | **82 ms** | about **400× faster** |
+| HTTP requests | 5,000 | **10** | **500× fewer** |
 
 The same module carries `src/main/resources/log4j2-example.xml`, an example configuration with a
 `<BatchHttp>` appender for every vendor. It is the starting point for [Splunk](vendors/splunk.md)
