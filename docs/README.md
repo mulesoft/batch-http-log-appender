@@ -1,7 +1,8 @@
 # Documentation
 
-Every page of the batch-http-appender documentation, grouped by what you are trying to do. The
-project overview and quick start are on the [repository landing page](../README.md).
+Every page of the batch-http-appender documentation, grouped by what you are trying to do. Start
+with your vendor; the project overview and quick start are on the
+[repository landing page](../README.md).
 
 ## Pick your vendor
 
@@ -10,57 +11,64 @@ Mule configuration, what the sink sends, how to verify delivery, troubleshooting
 vendor's CloudHub benchmark. All of them link the same option list,
 [configuration.md](configuration.md).
 
-| Vendor | `vendor=` | Page | Sample Mule project | CloudHub benchmark |
-| --- | --- | --- | --- | --- |
-| Datadog | `datadog` | [vendors/datadog.md](vendors/datadog.md) | [datadog-batch-http](../demo/mule/datadog-batch-http/) / [datadog-stock-http](../demo/mule/datadog-stock-http/) | [Datadog results](vendors/datadog.md#benchmark-on-cloudhub) |
-| New Relic | `newrelic` | [vendors/newrelic.md](vendors/newrelic.md) | [newrelic-batch-http](../demo/mule/newrelic-batch-http/) / [newrelic-stock-http](../demo/mule/newrelic-stock-http/) | [New Relic results](vendors/newrelic.md#benchmark-on-cloudhub) |
-| Elasticsearch | `elasticsearch` (`elastic`, `elk`) | [vendors/elasticsearch.md](vendors/elasticsearch.md) | [elastic-batch-http](../demo/mule/elastic-batch-http/) / [elastic-stock-http](../demo/mule/elastic-stock-http/) | [Elasticsearch results](vendors/elasticsearch.md#benchmark-on-cloudhub) |
-| Dynatrace | `dynatrace` | [vendors/dynatrace.md](vendors/dynatrace.md) | [dynatrace-batch-http](../demo/mule/dynatrace-batch-http/) / [dynatrace-stock-http](../demo/mule/dynatrace-stock-http/) | [Dynatrace results](vendors/dynatrace.md#benchmark-on-cloudhub) |
-| Splunk HEC | `splunk` (`splunkhec`) | [vendors/splunk.md](vendors/splunk.md) | none; see the [Java example config](../demo/java/benchmark/src/main/resources/log4j2-example.xml) | not measured |
-| Any HTTP intake | `generic` | [vendors/generic.md](vendors/generic.md) | none; see the [Java example config](../demo/java/benchmark/src/main/resources/log4j2-example.xml) | not measured |
+| Vendor page | `vendor=` | Sample Mule project | CloudHub benchmark |
+| --- | --- | --- | --- |
+| [Datadog](vendors/datadog.md) | `datadog` | [batch](../demo/mule/datadog-batch-http/) · [stock](../demo/mule/datadog-stock-http/) | [Datadog results](vendors/datadog.md#benchmark-on-cloudhub) |
+| [New Relic](vendors/newrelic.md) | `newrelic` | [batch](../demo/mule/newrelic-batch-http/) · [stock](../demo/mule/newrelic-stock-http/) | [New Relic results](vendors/newrelic.md#benchmark-on-cloudhub) |
+| [Elasticsearch](vendors/elasticsearch.md) | `elasticsearch` (`elastic`, `elk`) | [batch](../demo/mule/elastic-batch-http/) · [stock](../demo/mule/elastic-stock-http/) | [Elasticsearch results](vendors/elasticsearch.md#benchmark-on-cloudhub) |
+| [Dynatrace](vendors/dynatrace.md) | `dynatrace` | [batch](../demo/mule/dynatrace-batch-http/) · [stock](../demo/mule/dynatrace-stock-http/) | [Dynatrace results](vendors/dynatrace.md#benchmark-on-cloudhub) |
+| [Splunk HEC](vendors/splunk.md) | `splunk` (`splunkhec`) | none; see the [Java example config](../demo/java/benchmark/src/main/resources/log4j2-example.xml) | not measured |
+| [Any HTTP intake](vendors/generic.md) | `generic` | none; see the [Java example config](../demo/java/benchmark/src/main/resources/log4j2-example.xml) | not measured |
 
-In each sample pair the `*-batch-http` app uses `<BatchHttp>` and the `*-stock-http` app is its
-control: the same flows and workload, sent through Log4j2's built-in `<Http>` appender, one
-synchronous POST per event.
+The sample projects come in pairs; [Samples](#samples) explains what each half shows.
 
-## Configure
+## Configuration
 
-- [Configuration reference](configuration.md) — every `<BatchHttp>` option, with its type,
-  default and the vendors it applies to; required options per vendor; vendor per-request
-  limits; TLS for a self-signed collector; message size capping; vendor field mapping; how
-  invalid values behave; builder-only knobs; defaults that changed.
-- [Using it from a Mule app](mule.md) — bundling the appender into a Mule app, `log4j2.xml` in
-  Mule, injecting secrets, the sample A/B pairs, splitting CloudHub 1.0 from 2.0, deploying with
-  `scripts/deploy-ch1.sh`.
+| Page | What you will find |
+| --- | --- |
+| [Configuration reference](configuration.md) | Every `<BatchHttp>` option (type, default, vendors) (note 1) |
+| [Using it from a Mule app](mule.md) | Bundling the appender into a Mule app; `log4j2.xml` in Mule; injecting secrets; the sample A/B pairs; splitting CloudHub 1.0 from 2.0; deploying with `scripts/deploy-ch1.sh` |
 
-## Understand and operate
+1. Also: required options, per-request limits and field mapping per vendor; TLS for a self-signed
+   collector; message size capping; how invalid values behave; builder-only knobs; defaults that
+   changed.
 
-- [Architecture](architecture.md) — the batching path, the stock appender for contrast, and the
-  modules.
-- [Resilience, disk spill and crash recovery](resilience.md) — retries and overflow, the
-  disk-spill buffer (on by default; read before upgrading), crash recovery, crash-resilience
-  behaviour.
-- [Troubleshooting & diagnostics](troubleshooting.md) — where the appender's own messages go,
-  what it logs, "no spill files", programmatic counters.
-- [Validating memory safety and full drain](memory-safety.md) — the invariant to check, bounded
-  memory, full drain after processing.
+## Topics
 
-## Build
-
-- [Building, installing and verifying](building.md) — build and install locally, verify the
-  build, dependency hygiene and CVE scanning, run the local mock-intake benchmark and example.
+| Page | What you will find |
+| --- | --- |
+| [Architecture](architecture.md) | The batching path, the stock appender for contrast, and the modules |
+| [Resilience, disk spill and crash recovery](resilience.md) | Retries and overflow; the disk-spill buffer (on by default, read before upgrading); crash recovery; crash-resilience behaviour |
+| [Troubleshooting & diagnostics](troubleshooting.md) | Where the appender's own messages go; what it logs; "no spill files"; programmatic counters |
+| [Validating memory safety and full drain](memory-safety.md) | The invariant to check; bounded memory; full drain after processing |
+| [Building, installing and verifying](building.md) | Build and install locally; verify the build; dependency hygiene and CVE scanning; run the local mock-intake benchmark and example |
+| [Roadmap to production v1](roadmap.md) | What a production v1 would add to the 0.2.0 proof-of-concept |
 
 ## Benchmarks
 
-- [Benchmark results](benchmark-results.md) — the cross-vendor CloudHub benchmark (Datadog, New
-  Relic, Elasticsearch, Dynatrace): method, how to read it, caveats, charts and all four tests.
-  Per-vendor detail is on each vendor page.
-- [index.html](index.html) — the same results as a styled standalone report (generated by
-  [`charts/generate_report_html.py`](charts/generate_report_html.py); open it locally).
-- [Benchmark runbook](benchmark-runbook.md) — how to reproduce the CloudHub benchmark.
+| Page | What you will find |
+| --- | --- |
+| [Benchmark results](benchmark-results.md) | The cross-vendor CloudHub benchmark (Datadog, New Relic, Elasticsearch, Dynatrace): method, how to read it, caveats, charts and all four tests |
+| [index.html](index.html) | The same results as a styled standalone report, generated by [`charts/generate_report_html.py`](charts/generate_report_html.py); open it locally |
+| [Benchmark runbook](benchmark-runbook.md) | How to reproduce the CloudHub benchmark |
 
-## Project
+Per-vendor benchmark detail is on each vendor page, linked from
+[Pick your vendor](#pick-your-vendor).
 
-- [CHANGELOG](../CHANGELOG.md) · [Contributing](../CONTRIBUTING.md) ·
-  [Security](../SECURITY.md) · [Code of Conduct](../CODE_OF_CONDUCT.md) ·
-  [License](../LICENSE.txt)
+## Samples
+
+- Mule sample pairs, one per benchmarked vendor (links in [Pick your vendor](#pick-your-vendor)):
+  - the `*-batch-http` app uses `<BatchHttp>`;
+  - the `*-stock-http` app is its control: the same flows and workload, sent through Log4j2's
+    built-in `<Http>` appender, one synchronous POST per event.
+- A Java example config for vendors without a Mule sample (Splunk HEC, generic HTTP):
+  [`log4j2-example.xml`](../demo/java/benchmark/src/main/resources/log4j2-example.xml).
+- How to deploy and compare the pairs: [The sample A/B pairs](mule.md#the-sample-ab-pairs) in the
+  Mule guide. How to run the local mock-intake benchmark and example:
+  [Building, installing and verifying](building.md).
+
+---
+
+[Repository README](../README.md) · [Roadmap](roadmap.md) · [CHANGELOG](../CHANGELOG.md) ·
+[Contributing](../CONTRIBUTING.md) · [Security](../SECURITY.md) ·
+[Code of Conduct](../CODE_OF_CONDUCT.md) · [License](../LICENSE.txt)

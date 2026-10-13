@@ -439,4 +439,4 @@ printf '  oha --no-tui -z 5m -c %s <url>/log?count=%s\n' "$LOAD_CONC" "$LOAD_COU
 printf 'Run one app per vendor at a time; never two apps against the same vendor intake.\n'
 printf 'CloudHub 2.0 runs the same count= at -c 5 over https (docs/benchmark-results.md).\n'
 printf 'Validate every result with Little'"'"'s Law before recording it: req/s x avg latency ~ -c,\n'
-printf 'and total run ~ 60s; oha 1.14.0 can print latencies 10x low (runbook §7).\n'
+printf 'and total run ~ the -z duration (300 s for -z 5m); oha 1.14.0 can print latencies 10x low (runbook §7).\n'

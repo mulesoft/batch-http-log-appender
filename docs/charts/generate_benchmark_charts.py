@@ -724,9 +724,9 @@ _DELIVERY_NOTE = {
            "were still queued behind the Test 1\nbacklog when the next restart came. In Tests 1 and 3 "
            "stock's in-memory backlog died at the next restart."),
     "dt": ("Counted by event time in Grail (DQL by log.source). CloudHub 1.0 stock reached the "
-           "intake at a flat rate below what the app\ngenerated (one serialized background sender); "
-           "where the rest was lost is not established. CloudHub 2.0 stock's lower load\nstayed "
-           "just under that rate, so it delivered everything."),
+           "intake at a flat ~225 records/s, below what the app\ngenerated; where the rest was lost is "
+           "not established. CloudHub 2.0 stock generated less (about 140-230 records/s)\nand "
+           "delivered 100%."),
 }
 
 

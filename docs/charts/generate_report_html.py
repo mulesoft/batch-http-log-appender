@@ -191,18 +191,17 @@ def dt_note(key, b, s):
     gen = s["reqs"] * 22 / s["total"]  # records/s the measured requests generated
     if key == "ch1":
         return (f'\n  <p class="sub">Batch delivered {pct(b["delivered"])}. Stock delivered '
-                f'{pct(s["delivered"])}: its one serialized Log4j background sender reached the '
-                f'intake at a flat ~{DT_STOCK_ARRIVAL_RATE} records/s throughout, while the app '
-                f'generated about {gen:.0f} records/s in this test. '
-                'Where the undelivered stock records were lost is not established; the timing points '
-                'at the async queue rather than a restart (nothing restarted after Test 4, and a queued '
-                'backlog would have drained before it was counted). Dynatrace stock req/s is far higher than the other vendors\' '
-                'stock because a single-record POST to the in-region intake is quick, so '
-                'batch÷stock is smaller here. See <a href="vendors/dynatrace.md">the Dynatrace '
-                'page</a>.</p>')
+                f'{pct(s["delivered"])}: its records reached the intake at a flat '
+                f'~{DT_STOCK_ARRIVAL_RATE} records/s throughout, while the app generated about '
+                f'{gen:.0f} records/s in this test. '
+                'Where the undelivered stock records were lost is not established; the run did not '
+                'measure it. Nothing restarted after Test 4, the last round. Dynatrace stock req/s '
+                'is far higher than the other vendors\' stock, so batch÷stock is smaller here; a '
+                'single-record POST to the in-region intake took about 4.4 ms. See '
+                '<a href="vendors/dynatrace.md">the Dynatrace page</a>.</p>')
     return (f'\n  <p class="sub">Batch and stock both delivered 100%: this stock app\'s own load '
             f'(about {gen:.0f} records/s in this test) sat just under the ~{DT_STOCK_ARRIVAL_RATE} '
-            'records/s its single background sender sustains. '
+            'records/s at which CloudHub 1.0 stock\'s records reached the intake. '
             'See <a href="vendors/dynatrace.md">the Dynatrace page</a>.</p>')
 
 
@@ -442,9 +441,9 @@ TEMPLATE = '''<!DOCTYPE html>
     <b>{ch1_lo}–{ch1_hi}× the request throughput on CloudHub 1.0</b> and
     <b>{ch2_lo}–{ch2_hi}× on CloudHub 2.0</b>, and delivered every log to Datadog,
     Elasticsearch and Dynatrace in every test. The low end of each range is Dynatrace: its batch
-    app ran at the same req/s as the other vendors' ({dt_b1} on CloudHub 1.0, {dt_b2} on
-    CloudHub 2.0), so the worker, not the vendor, bounds batch; but a single-record POST to its
-    in-region intake is quick, so the stock appender is penalised far less there. The stock appender's synchronous
+    app ran at about the same req/s as the other vendors' ({dt_b1} on CloudHub 1.0, {dt_b2} on
+    CloudHub 2.0), while its stock app ran far faster than theirs; a single-record POST to its
+    in-region intake took about 4.4 ms. The stock appender's synchronous
     one-POST-per-event send holds the request thread for the whole round-trip to the intake,
     so under concurrency its single background flusher never catches up and its tail climbs
     into the multi-second — sometimes tens-of-seconds — range. The batch appender's
@@ -554,16 +553,16 @@ TEMPLATE = '''<!DOCTYPE html>
       in memory when the next restart comes is gone.</li>
       <li><b>Dynatrace was measured a day later, on its own.</b> Same protocol, sizes, region and
       build as the other three, but run 2026-10-13 as the only lane. Its batch÷stock is only
-      {dt_lo}–{dt_hi}× in Test 3 (the other vendors: {oth_lo}–{oth_hi}×) because a
-      single-record POST to the in-region Dynatrace intake takes about 4.4 ms, so the stock appender is penalised far less; batch req/s is the same as elsewhere.
+      {dt_lo}–{dt_hi}× in Test 3 (the other vendors: {oth_lo}–{oth_hi}×): batch req/s is about
+      the same as elsewhere, while stock ran far faster than the other vendors' stock. A
+      single-record POST to the in-region Dynatrace intake took about 4.4 ms.
       Batch delivered 100% in every test on both planes. CloudHub 1.0 stock delivered only
-      {dt_s_lo}–{dt_s_hi}%: its single serialized background sender reached the intake at a flat
-      rate of about {dt_rate} records/s throughout, below what the app generated. CloudHub 2.0
-      stock's own load sat just under that rate and it delivered 100%. This is not Dynatrace
-      throttling: a 914 req/s single-record burst from a laptop got HTTP 204 for every request
-      and every record was stored. Where the undelivered CloudHub 1.0 stock records were lost is
-      not established; the timing points at the async queue rather than a restart (nothing
-      restarted after Test 4, and a queued backlog would have drained before it was counted).</li>
+      {dt_s_lo}–{dt_s_hi}%: its records reached the intake at a flat rate of about {dt_rate}
+      records/s throughout, below what the app generated. CloudHub 2.0 stock's own load sat just
+      under that rate, and it delivered 100%. In a separate check, a 914 req/s single-record
+      burst from a laptop got HTTP 204 for every request, and every record was stored. Where the
+      undelivered CloudHub 1.0 stock records were lost is not established; the run did not
+      measure it. Nothing restarted after Test 4, the last round.</li>
       <li><b>Correction to the 2026-08-04 run.</b> Its CloudHub 2.0 Datadog stock app carried a
       leftover <code>AsyncLoggerConfig.RingBufferSize=20000</code> and <code>log4j2.debug=true</code>
       that no other app had. It measured 5.75 req/s with them against 1.46 without, so the
