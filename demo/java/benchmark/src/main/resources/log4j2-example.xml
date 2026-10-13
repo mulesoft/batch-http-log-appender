@@ -45,11 +45,11 @@
 
         <!-- New Relic Log API. Set NEW_RELIC_LICENSE_KEY in the environment.
              `host` is the Log API endpoint for your account's data centre (the sink appends
-             /log/v1). Take the value from New Relic's own documentation; leave the attribute
-             off entirely to use the sink's default. -->
+             /log/v1). Take the value from New Relic's own documentation; the :- default is the
+             US Log API, so an unset NEW_RELIC_LOG_HOST does not end up in the URI. -->
         <BatchHttp name="newrelic"
                    vendor="newrelic"
-                   host="${env:NEW_RELIC_LOG_HOST}"
+                   host="${env:NEW_RELIC_LOG_HOST:-log-api.newrelic.com}"
                    apiKey="${env:NEW_RELIC_LICENSE_KEY}"
                    lingerMillis="1000"
                    gzip="true"/>

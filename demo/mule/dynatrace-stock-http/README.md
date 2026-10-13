@@ -44,7 +44,7 @@ To measure against a local mock intake instead of a real environment, start the 
 ## Telling the apps apart
 
 `log.source` is `${sys:domain:-dynatrace-stock-http}`, the same rule as the batch sibling:
-CloudHub 1.0 supplies the application name (for example `dynatrace-stock-http-poc`); on
+CloudHub 1.0 supplies the application name (the module name plus any `$CH1_APP_SUFFIX` you deployed with); on
 CloudHub 2.0 add an application property `domain=dynatrace-stock-http`; locally it is
 `dynatrace-stock-http`. See
 [`dynatrace-batch-http`](../dynatrace-batch-http#telling-the-apps-apart-logsource).
@@ -71,7 +71,7 @@ In Dynatrace, open the **Logs** app, or run as DQL:
 
 ```text
 fetch logs
-| filter log.source == "dynatrace-stock-http-poc"
+| filter log.source == "dynatrace-stock-http"
 | sort timestamp desc
 ```
 

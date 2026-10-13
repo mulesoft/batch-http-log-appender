@@ -241,7 +241,7 @@ crash are replayed on the next startup.
 the library default. Nothing touches disk on the happy path; records are written to rotating
 segment files only when a batch fails after retries are exhausted, or when the queue would
 overflow (`spillOnOverflow="true"`). The overload signal is therefore **`spilledRecords`** in the
-stats heartbeat, as the root README's spill section describes. Records lost because the spill
+stats heartbeat, as [Disk-spill buffer](../../../docs/resilience.md#disk-spill-buffer) describes. Records lost because the spill
 buffer itself is full land in `spillStats().droppedRecords` (`evictedRecords` for an evicted
 oldest segment), never in `dropped`, which counts terminal rejections (a 4xx) and serialization
 failures. The buffer is bounded (512 MiB total, with a 256 MiB
@@ -308,10 +308,13 @@ sharing one spill directory never collide).
 This walkthrough uses the demo as shipped, with spill on. (With `batch.spillEnabled=false`
 the failed batches are dropped and counted instead, and nothing appears on disk.)
 
-1. Start the app **without** a valid key (so shipping fails):
+1. Start the app with a valid key but an **unreachable** intake, so every send fails with a
+   connection error. That is retryable, so batches spill once their retries run out. (Starting
+   without a key does not work here: Datadog answers `403`, which is final, so those batches are
+   dropped and never spilled.)
 
    ```bash
-   # no DD_API_KEY / -Ddatadog.apiKey set -> sends are rejected
+   # start with -Ddd.site=127.0.0.1:9 (-M-Ddd.site=127.0.0.1:9 under the standalone Mule wrapper)
    curl "http://localhost:8083/log?count=2000"
    ```
 
@@ -321,9 +324,9 @@ the failed batches are dropped and counted instead, and nothing appears on disk.
    watch -n1 'ls -lh /tmp/batch-http-spill/Datadog/'
    ```
 
-3. Provide a real key and restart the app. The replayer drains the backlog and the
+3. Remove the `dd.site` override (or set your real Datadog site) and restart the app. The replayer drains the backlog and the
    files disappear as each segment ships successfully — the buffered logs then show up
    in Datadog.
 
-See the repo root README's **Disk-spill buffer** section for the full attribute
-reference and tuning notes.
+See [Disk-spill buffer](../../../docs/resilience.md#disk-spill-buffer) for the tuning notes and
+the [spill options](../../../docs/configuration.md#disk-spill) for the full attribute reference.

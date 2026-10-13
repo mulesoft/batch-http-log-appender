@@ -16,8 +16,8 @@
     limitations under the License.
 -->
 <!--
-    GENERATED FILE — do not hand-edit. Rebuild the published 2026-10-12 run with:
-        BENCH_RESULTS=.claude/bench-results/publish-020 .venv-charts/bin/python docs/charts/generate_report_html.py
+    GENERATED FILE — do not hand-edit. Rebuild the published four-vendor set with:
+        BENCH_RESULTS=.claude/bench-results/publish-vendors .venv-charts/bin/python docs/charts/generate_report_html.py
     (without BENCH_RESULTS the script reads .claude/bench-results/, which holds older rounds)
 -->
 <html lang="en">
@@ -41,6 +41,11 @@
   h2 { font-size: 20px; margin: 40px 0 12px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
   h2 .tag { font-size: 13px; color: var(--muted); font-weight: 500; letter-spacing: 0; }
   h3 { font-size: 15px; margin: 24px 0 8px; }
+  h3 .tag { font-size: 12px; color: var(--muted); font-weight: 500; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .card .label a { color: inherit; text-decoration: underline; text-decoration-color: var(--border); }
+  .links { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 4px 0 8px; font-size: 14px; }
   .sub { color: var(--muted); margin: 0 0 24px; }
   code { background: #21262d; padding: 2px 6px; border-radius: 5px; font-size: 0.88em;
          font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
@@ -103,25 +108,39 @@
 <div class="wrap">
 
   <h1>batch-http-appender — performance</h1>
-  <p class="sub">Stock Log4j2 <code>HttpAppender</code> vs. the batching HTTP appender (v0.2.0), measured on twelve Mule apps — a batch/stock pair shipping to each of <b>Datadog</b>, <b>New Relic</b> and <b>Elasticsearch</b>, on both CloudHub&nbsp;1.0 and CloudHub&nbsp;2.0 — with the logs delivered counted at every vendor. Headline figures are the <b>5-minute sustained run (Test 3)</b>; see the cold-start caveat below for why the 1-minute run reads lower.</p>
+  <p class="sub">Stock Log4j2 <code>HttpAppender</code> vs. the batching HTTP appender (v0.2.0), measured on sixteen Mule apps — a batch/stock pair shipping to each of <b>Datadog</b>, <b>New Relic</b>, <b>Elasticsearch</b> and <b>Dynatrace</b>, on both CloudHub&nbsp;1.0 and CloudHub&nbsp;2.0 — with the logs delivered counted at every vendor. Datadog, New Relic and Elasticsearch were measured on 2026-10-12 as three parallel lanes; Dynatrace was measured on 2026-10-13, its lane alone, with the same protocol, sizes, region and build. Headline figures are the <b>5-minute sustained run (Test 3)</b>; see the cold-start caveat below for why the 1-minute run reads lower.</p>
 
   <div class="meta">
     <span class="chip"><b>Targets:</b> CloudHub 1.0 &amp; 2.0</span>
     <span class="chip"><b>Worker:</b> 0.1 vCore</span>
-    <span class="chip"><b>Vendors:</b> Datadog, New Relic &amp; Elasticsearch</span>
+    <span class="chip"><b>Vendors:</b> Datadog, New Relic, Elasticsearch &amp; Dynatrace</span>
     <span class="chip"><b>Load:</b> oha 1.16, 5 min, CH1 -c 10 / CH2 -c 5</span>
     <span class="chip"><b>Endpoint:</b> <code>/log?count=20</code> — 22 events/request</span>
     <span class="chip"><b>Spill:</b> on</span>
-    <span class="chip"><b>Measured:</b> 2026-10-12</span>
+    <span class="chip"><b>Measured:</b> 2026-10-12 (Datadog, New Relic, Elasticsearch) · 2026-10-13 (Dynatrace)</span>
     <span class="chip"><b>appender:</b> v0.2.0</span>
+  </div>
+
+  <div class="links">
+    <span>Per-vendor setup, sample Mule project and results:</span>
+    <a href="vendors/datadog.md">Datadog</a>
+    <a href="vendors/newrelic.md">New Relic</a>
+    <a href="vendors/elasticsearch.md">Elasticsearch</a>
+    <a href="vendors/dynatrace.md">Dynatrace</a>
+    <span>·</span>
+    <a href="configuration.md">Every <code>&lt;BatchHttp&gt;</code> option</a>
+    <a href="benchmark-results.md">Full Markdown report</a>
   </div>
 
   <div class="verdict">
     Against its own stock sibling, on the same platform, shipping to the same vendor,
     the batching appender sustained a 5-minute run at
-    <b>53.5–139.5× the request throughput on CloudHub 1.0</b> and
-    <b>28.5–59.5× on CloudHub 2.0</b>, and delivered every log to Datadog and
-    Elasticsearch in every test. The stock appender's synchronous
+    <b>6.5–139.5× the request throughput on CloudHub 1.0</b> and
+    <b>4.4–59.5× on CloudHub 2.0</b>, and delivered every log to Datadog,
+    Elasticsearch and Dynatrace in every test. The low end of each range is Dynatrace: its batch
+    app ran at the same req/s as the other vendors' (135 on CloudHub 1.0, 41 on
+    CloudHub 2.0), so the worker, not the vendor, bounds batch; but a single-record POST to its
+    in-region intake is quick, so the stock appender is penalised far less there. The stock appender's synchronous
     one-POST-per-event send holds the request thread for the whole round-trip to the intake,
     so under concurrency its single background flusher never catches up and its tail climbs
     into the multi-second — sometimes tens-of-seconds — range. The batch appender's
@@ -133,40 +152,50 @@
 
   <div class="headline">
     <div class="card">
-      <div class="label">CloudHub 1.0 · Datadog</div>
+      <div class="label">CloudHub 1.0 · <a href="vendors/datadog.md">Datadog</a></div>
       <div class="big batch">53.5× <span style="font-size:16px;color:var(--muted)">throughput</span></div>
       <div class="note">140.24 vs 2.62 req/s &middot; batch vs stock (5-min run) &middot; logs delivered 100.0% vs 57.1%</div>
     </div>
     <div class="card">
-      <div class="label">CloudHub 1.0 · New Relic</div>
+      <div class="label">CloudHub 1.0 · <a href="vendors/newrelic.md">New Relic</a></div>
       <div class="big batch">110.8× <span style="font-size:16px;color:var(--muted)">throughput</span></div>
       <div class="note">133.72 vs 1.21 req/s &middot; batch vs stock (5-min run) &middot; logs delivered 44.5% vs 35.6%</div>
     </div>
     <div class="card">
-      <div class="label">CloudHub 1.0 · Elasticsearch</div>
+      <div class="label">CloudHub 1.0 · <a href="vendors/elasticsearch.md">Elasticsearch</a></div>
       <div class="big batch">139.5× <span style="font-size:16px;color:var(--muted)">throughput</span></div>
       <div class="note">136.15 vs 0.98 req/s &middot; batch vs stock (5-min run) &middot; logs delivered 100.0% vs 36.1%</div>
     </div>
     <div class="card">
-      <div class="label">CloudHub 2.0 · Datadog</div>
+      <div class="label">CloudHub 1.0 · <a href="vendors/dynatrace.md">Dynatrace</a></div>
+      <div class="big batch">6.5× <span style="font-size:16px;color:var(--muted)">throughput</span></div>
+      <div class="note">134.54 vs 20.58 req/s &middot; batch vs stock (5-min run) &middot; logs delivered 100.0% vs 50.9%</div>
+    </div>
+    <div class="card">
+      <div class="label">CloudHub 2.0 · <a href="vendors/datadog.md">Datadog</a></div>
       <div class="big batch">28.5× <span style="font-size:16px;color:var(--muted)">throughput</span></div>
       <div class="note">42.03 vs 1.48 req/s &middot; batch vs stock (5-min run) &middot; logs delivered 100.0% vs 83.0%</div>
     </div>
     <div class="card">
-      <div class="label">CloudHub 2.0 · New Relic</div>
+      <div class="label">CloudHub 2.0 · <a href="vendors/newrelic.md">New Relic</a></div>
       <div class="big batch">59.5× <span style="font-size:16px;color:var(--muted)">throughput</span></div>
       <div class="note">45.09 vs 0.76 req/s &middot; batch vs stock (5-min run) &middot; logs delivered 77.3% vs 37.6%</div>
     </div>
     <div class="card">
-      <div class="label">CloudHub 2.0 · Elasticsearch</div>
+      <div class="label">CloudHub 2.0 · <a href="vendors/elasticsearch.md">Elasticsearch</a></div>
       <div class="big batch">48.6× <span style="font-size:16px;color:var(--muted)">throughput</span></div>
       <div class="note">35.68 vs 0.73 req/s &middot; batch vs stock (5-min run) &middot; logs delivered 100.0% vs 32.9%</div>
+    </div>
+    <div class="card">
+      <div class="label">CloudHub 2.0 · <a href="vendors/dynatrace.md">Dynatrace</a></div>
+      <div class="big batch">4.4× <span style="font-size:16px;color:var(--muted)">throughput</span></div>
+      <div class="note">40.68 vs 9.18 req/s &middot; batch vs stock (5-min run) &middot; logs delivered 100.0% vs 100.0%</div>
     </div>
   </div>
 
   <h2>CloudHub 1.0 <span class="tag">— 0.1 vCore worker · <code>/log?count=20</code> · 22 events/request · 5-minute sustained run (Test 3) · -c 10</span></h2>
 
-  <h3>Datadog intake</h3>
+  <h3><a href="vendors/datadog.md">Datadog</a> intake <span class="tag">— measured 2026-10-12</span></h3>
   <div class="headline">
     <div class="card">
       <div class="label">Stock HttpAppender</div>
@@ -211,7 +240,7 @@
       <div class="bar batch" style="width:1.7%"><span class="out">226 ms</span></div></div></div>
   </div>
 
-  <h3>New Relic intake</h3>
+  <h3><a href="vendors/newrelic.md">New Relic</a> intake <span class="tag">— measured 2026-10-12</span></h3>
   <p class="sub">Batch delivered 44.5% here because its spill backlog was still draining to the US intake when the next round's restart replaced the worker; in Test 4, the last round, it delivered 100%. See "New Relic results depend on location" below.</p>
   <div class="headline">
     <div class="card">
@@ -257,7 +286,7 @@
       <div class="bar batch" style="width:0.6%"><span class="out">322 ms</span></div></div></div>
   </div>
 
-  <h3>Elasticsearch intake</h3>
+  <h3><a href="vendors/elasticsearch.md">Elasticsearch</a> intake <span class="tag">— measured 2026-10-12</span></h3>
   <div class="headline">
     <div class="card">
       <div class="label">Stock HttpAppender</div>
@@ -302,9 +331,55 @@
       <div class="bar batch" style="width:0.4%"><span class="out">270 ms</span></div></div></div>
   </div>
 
+  <h3><a href="vendors/dynatrace.md">Dynatrace</a> intake <span class="tag">— measured 2026-10-13</span></h3>
+  <p class="sub">Batch delivered 100.0%. Stock delivered 50.9%: its one serialized Log4j background sender reached the intake at a flat ~225 records/s throughout, while the app generated about 453 records/s in this test. Where the undelivered stock records were lost is not established; the timing points at the async queue rather than a restart (nothing restarted after Test 4, and a queued backlog would have drained before it was counted). Dynatrace stock req/s is far higher than the other vendors' stock because a single-record POST to the in-region intake is quick, so batch÷stock is smaller here. See <a href="vendors/dynatrace.md">the Dynatrace page</a>.</p>
+  <div class="headline">
+    <div class="card">
+      <div class="label">Stock HttpAppender</div>
+      <div class="big stock">20.58 <span style="font-size:16px;color:var(--muted)">req/s</span></div>
+      <div class="note">avg 485 ms &middot; p90 1,044 ms &middot; 6,195 reqs &middot; 100% ok &middot; 50.9% delivered</div>
+    </div>
+    <div class="card">
+      <div class="label">Batch appender (0.2.0)</div>
+      <div class="big batch">134.54 <span style="font-size:16px;color:var(--muted)">req/s</span></div>
+      <div class="note">avg 74 ms &middot; p90 127 ms &middot; 40,373 reqs &middot; 100% ok &middot; 100.0% delivered</div>
+    </div>
+  </div>
+
+  <table>
+    <thead>
+      <tr><th>Metric</th><th>Stock HttpAppender</th><th>Batch appender 0.2.0</th><th>Improvement</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Requests / sec</td><td class="stock">20.58</td><td class="batch">134.54</td><td class="win">6.5×</td></tr>
+      <tr><td>Total requests (5 min)</td><td class="stock">6,195</td><td class="batch">40,373</td><td class="win">6.5×</td></tr>
+      <tr><td>Success rate</td><td class="stock">100.00%</td><td class="batch">100.00%</td><td class="win"></td></tr>
+      <tr><td>Logs delivered</td><td class="stock">50.9%</td><td class="batch">100.0%</td><td class="win"></td></tr>
+      <tr><td>Average latency</td><td class="stock">485 ms</td><td class="batch">74 ms</td><td class="win">6.5× lower</td></tr>
+      <tr><td>p50</td><td class="stock">298 ms</td><td class="batch">54 ms</td><td class="win"></td></tr>
+      <tr><td>p90</td><td class="stock">1,044 ms</td><td class="batch">127 ms</td><td class="win">8×</td></tr>
+      <tr><td>p99</td><td class="stock">1,259 ms</td><td class="batch">304 ms</td><td class="win">4×</td></tr>
+      <tr><td>Fastest</td><td class="stock">17 ms</td><td class="batch">15 ms</td><td class="win"></td></tr>
+      <tr><td>Slowest</td><td class="stock">5,223 ms</td><td class="batch">7,431 ms</td><td class="loss">1.4× higher</td></tr>
+    </tbody>
+  </table>
+
+  <div class="bars">
+    <div class="legend"><span><i style="background:var(--stock)"></i>Stock</span><span><i style="background:var(--batch)"></i>Batch 0.2.0</span><span>bar length &prop; latency (max = 1,259 ms)</span></div>
+    <div class="barrow"><div class="plabel">p50</div><div class="bartrack">
+      <div class="bar stock" style="width:23.6%"><span class="out">298 ms</span></div>
+      <div class="bar batch" style="width:4.3%"><span class="out">54 ms</span></div></div></div>
+    <div class="barrow"><div class="plabel">p90</div><div class="bartrack">
+      <div class="bar stock" style="width:82.9%"><span class="out">1,044 ms</span></div>
+      <div class="bar batch" style="width:10.1%"><span class="out">127 ms</span></div></div></div>
+    <div class="barrow"><div class="plabel">p99</div><div class="bartrack">
+      <div class="bar stock" style="width:100.0%"><span class="out">1,259 ms</span></div>
+      <div class="bar batch" style="width:24.1%"><span class="out">304 ms</span></div></div></div>
+  </div>
+
   <h2>CloudHub 2.0 <span class="tag">— 0.1 vCore replica · <code>/log?count=20</code> · 22 events/request · 5-minute sustained run (Test 3) · -c 5</span></h2>
 
-  <h3>Datadog intake</h3>
+  <h3><a href="vendors/datadog.md">Datadog</a> intake <span class="tag">— measured 2026-10-12</span></h3>
   <div class="headline">
     <div class="card">
       <div class="label">Stock HttpAppender</div>
@@ -349,7 +424,7 @@
       <div class="bar batch" style="width:6.1%"><span class="out">498 ms</span></div></div></div>
   </div>
 
-  <h3>New Relic intake</h3>
+  <h3><a href="vendors/newrelic.md">New Relic</a> intake <span class="tag">— measured 2026-10-12</span></h3>
   <p class="sub">Batch delivered 77.3% here because its spill backlog was still draining to the US intake when the next round's restart replaced the pod; in Test 4, the last round, it delivered 100%. See "New Relic results depend on location" below.</p>
   <div class="headline">
     <div class="card">
@@ -395,7 +470,7 @@
       <div class="bar batch" style="width:1.4%"><span class="out">476 ms</span></div></div></div>
   </div>
 
-  <h3>Elasticsearch intake</h3>
+  <h3><a href="vendors/elasticsearch.md">Elasticsearch</a> intake <span class="tag">— measured 2026-10-12</span></h3>
   <div class="headline">
     <div class="card">
       <div class="label">Stock HttpAppender</div>
@@ -440,14 +515,62 @@
       <div class="bar batch" style="width:1.7%"><span class="out">663 ms</span></div></div></div>
   </div>
 
+  <h3><a href="vendors/dynatrace.md">Dynatrace</a> intake <span class="tag">— measured 2026-10-13</span></h3>
+  <p class="sub">Batch and stock both delivered 100%: this stock app's own load (about 202 records/s in this test) sat just under the ~225 records/s its single background sender sustains. See <a href="vendors/dynatrace.md">the Dynatrace page</a>.</p>
+  <div class="headline">
+    <div class="card">
+      <div class="label">Stock HttpAppender</div>
+      <div class="big stock">9.18 <span style="font-size:16px;color:var(--muted)">req/s</span></div>
+      <div class="note">avg 545 ms &middot; p90 755 ms &middot; 2,756 reqs &middot; 100% ok &middot; 100.0% delivered</div>
+    </div>
+    <div class="card">
+      <div class="label">Batch appender (0.2.0)</div>
+      <div class="big batch">40.68 <span style="font-size:16px;color:var(--muted)">req/s</span></div>
+      <div class="note">avg 123 ms &middot; p90 205 ms &middot; 12,207 reqs &middot; 100% ok &middot; 100.0% delivered</div>
+    </div>
+  </div>
+
+  <table>
+    <thead>
+      <tr><th>Metric</th><th>Stock HttpAppender</th><th>Batch appender 0.2.0</th><th>Improvement</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Requests / sec</td><td class="stock">9.18</td><td class="batch">40.68</td><td class="win">4.4×</td></tr>
+      <tr><td>Total requests (5 min)</td><td class="stock">2,756</td><td class="batch">12,207</td><td class="win">4.4×</td></tr>
+      <tr><td>Success rate</td><td class="stock">100.00%</td><td class="batch">100.00%</td><td class="win"></td></tr>
+      <tr><td>Logs delivered</td><td class="stock">100.0%</td><td class="batch">100.0%</td><td class="win"></td></tr>
+      <tr><td>Average latency</td><td class="stock">545 ms</td><td class="batch">123 ms</td><td class="win">4.4× lower</td></tr>
+      <tr><td>p50</td><td class="stock">480 ms</td><td class="batch">96 ms</td><td class="win"></td></tr>
+      <tr><td>p90</td><td class="stock">755 ms</td><td class="batch">205 ms</td><td class="win">4×</td></tr>
+      <tr><td>p99</td><td class="stock">1,429 ms</td><td class="batch">501 ms</td><td class="win">3×</td></tr>
+      <tr><td>Fastest</td><td class="stock">17 ms</td><td class="batch">15 ms</td><td class="win"></td></tr>
+      <tr><td>Slowest</td><td class="stock">2,162 ms</td><td class="batch">13,434 ms</td><td class="loss">6.2× higher</td></tr>
+    </tbody>
+  </table>
+
+  <div class="bars">
+    <div class="legend"><span><i style="background:var(--stock)"></i>Stock</span><span><i style="background:var(--batch)"></i>Batch 0.2.0</span><span>bar length &prop; latency (max = 1,429 ms)</span></div>
+    <div class="barrow"><div class="plabel">p50</div><div class="bartrack">
+      <div class="bar stock" style="width:33.6%"><span class="out">480 ms</span></div>
+      <div class="bar batch" style="width:6.7%"><span class="out">96 ms</span></div></div></div>
+    <div class="barrow"><div class="plabel">p90</div><div class="bartrack">
+      <div class="bar stock" style="width:52.8%"><span class="out">755 ms</span></div>
+      <div class="bar batch" style="width:14.3%"><span class="out">205 ms</span></div></div></div>
+    <div class="barrow"><div class="plabel">p99</div><div class="bartrack">
+      <div class="bar stock" style="width:100.0%"><span class="out">1,429 ms</span></div>
+      <div class="bar batch" style="width:35.1%"><span class="out">501 ms</span></div></div></div>
+  </div>
+
   <!-- ============================ Shared: methodology ============================ -->
   <h2>What was tested</h2>
-  <p>Three batch/stock pairs of functionally identical Mule 4 applications — one member of each
+  <p>Four batch/stock pairs of functionally identical Mule 4 applications — one member of each
   pair on Log4j2's stock <code>&lt;Http&gt;</code> appender, the other on this library's
   <code>&lt;BatchHttp&gt;</code> (v0.2.0) — one pair shipping to the <b>Datadog</b> Logs intake
   (site <code>ap2</code>, Sydney), one to the <b>New Relic</b> Logs intake (US,
-  <code>log-api.newrelic.com</code>) and one to <b>Elasticsearch</b> (Elastic Cloud Serverless,
-  Sydney), all six deployed to <b>each</b> platform (twelve apps total). Within a pair the apps
+  <code>log-api.newrelic.com</code>), one to <b>Elasticsearch</b> (Elastic Cloud Serverless,
+  Sydney) and one to <b>Dynatrace</b> (Dynatrace SaaS on AWS, Sydney), all eight deployed to
+  <b>each</b> platform (sixteen apps total). The sample Mule projects are in the repository and
+  linked from each vendor page. Within a pair the apps
   share the same flow, the same <code>&lt;Loggers&gt;</code> wiring, and the same file appender;
   the <b>only substantive difference is the appender element</b>. The batch apps run
   <code>maxBatchRecords=200</code>, one flusher, <code>gzip="false"</code> and <b>disk spill
@@ -460,23 +583,26 @@
   lower concurrency to stay off its OOM ceiling. Because <code>-c</code> differs, <b>compare only
   within a plane (batch vs stock), never CloudHub 1.0 against CloudHub 2.0</b>. Every worker and
   replica runs in Sydney (<code>ap-southeast-2</code>).</p>
-  <p>The three vendors ran as <b>parallel lanes</b>, since each has its own intake, with <b>one app
-  per vendor at a time</b>: CH1 batch, CH1 stock, CH2 batch, CH2 stock, with a barrier after each
-  step. As a control, against a sequential, Elasticsearch-only run of 2026-10-11, Elasticsearch
+  <p>Datadog, New Relic and Elasticsearch ran on 2026-10-12 as <b>parallel lanes</b>, since each
+  has its own intake, with <b>one app per vendor at a time</b>: CH1 batch, CH1 stock, CH2 batch,
+  CH2 stock, with a barrier after each step. Dynatrace ran on 2026-10-13 as a <b>single lane on
+  its own</b>, with the same protocol, the same app and worker sizes, the same region and the
+  same build. As a control, against a sequential, Elasticsearch-only run of 2026-10-11, Elasticsearch
   stock req/s in the parallel lanes was within 3% on CloudHub 2.0 in the 5-minute rounds. On
   CloudHub 1.0 it was −3.3% in Test 4 and −14.6% in Test 3; an earlier parallel round of the same
   stock apps read +2.9% and −7.1% there, so a single CloudHub 1.0 stock run moves that much on its
   own. <b>Every test starts on a freshly restarted app</b> (restarts are pipelined ahead of each
   app's turn), followed by 5 light warmups and a 30 s drain. The exception is the churn window,
-  which follows Test 1 with no restart. Measured 2026-10-12.</p>
+  which follows Test 1 with no restart.</p>
   <p><b>Logs delivered</b> is the logs that reached the vendor divided by the logs the measured
   requests generated (HTTP 200 responses × 22). Elasticsearch is counted by event time inside
-  the <code>oha</code> window. Datadog and New Relic are counted by arrival time, from the test's
+  the <code>oha</code> window, and so is Dynatrace (in Grail, with DQL, by
+  <code>log.source</code>). Datadog and New Relic are counted by arrival time, from the test's
   start to the next test on the same app: the demos omit the vendors' reserved event-time
   attribute on purpose, so the vendor stamps arrival. A value over 100% is late backlog from an
   earlier test arriving in the window, or log lines of requests <code>oha</code> cut off.</p>
   <p>Each 5-minute run shown here independently corroborates the load parameters: requests/sec ×
-  mean latency ≈ the plane's concurrency (Little's Law) holds within 8% across all twelve. It does
+  mean latency ≈ the plane's concurrency (Little's Law) holds within 8% across all sixteen. It does
   not hold for every run in the full report: where requests fail or time out (Test 4, New Relic
   on CloudHub 1.0 in the churn window) or a long stock tail drains past the deadline (the
   1-minute tests), the product falls below <code>-c</code>. The parsers still normalise the
@@ -514,9 +640,9 @@
       <li><b>New Relic results depend on location.</b> The workers run in Sydney
       (<code>ap-southeast-2</code>), next to Datadog's <code>ap2</code> site and the
       Elasticsearch project. New Relic offers only US and EU regions; these apps ship to the US
-      endpoint (<code>log-api.newrelic.com</code>), so every batch crosses the Pacific and the
-      backlog drains at about 330 logs/s. Requests/sec measures how responsive the app stays, not
-      how many logs arrive. New Relic batch delivered about 96–107% in Test 1 and churn, 44.5%
+      endpoint (<code>log-api.newrelic.com</code>), so every batch crosses the Pacific (on
+      CloudHub 1.0 in Test 3 the backlog drained at about 330 logs/s). Requests/sec measures how
+      responsive the app stays, not how many logs arrive. New Relic batch delivered about 96–107% in Test 1 and churn, 44.5%
       (CloudHub 1.0) and 77.3% (CloudHub 2.0) in Test 3, and 100% in Test 4. The Test 3 shortfall
       is a restart, not a drop: the 5-minute burst spilled to disk faster than the US intake took
       it, and the backlog was still draining when the next round's restart replaced the worker
@@ -524,8 +650,21 @@
       spill files went with it. Test 4 was the last round; nothing restarted after it, and its
       backlog drained in about 12 minutes. Workers closer to the New Relic region, or
       <code>gzip</code> plus more <code>flusherThreads</code>, ship faster.</li>
-      <li><b>Stock loses its backlog at every restart.</b> Stock delivered 14–83% of its logs in
-      Test 1 and Test 3: what is still queued in memory when the next restart comes is gone.</li>
+      <li><b>Stock loses its backlog at every restart.</b> At Datadog, New Relic and
+      Elasticsearch, stock delivered 14–83% of its logs in Test 1 and Test 3: what is still queued
+      in memory when the next restart comes is gone.</li>
+      <li><b>Dynatrace was measured a day later, on its own.</b> Same protocol, sizes, region and
+      build as the other three, but run 2026-10-13 as the only lane. Its batch÷stock is only
+      4.4–6.5× in Test 3 (the other vendors: 28–140×) because a
+      single-record POST to the in-region Dynatrace intake takes about 4.4 ms, so the stock appender is penalised far less; batch req/s is the same as elsewhere.
+      Batch delivered 100% in every test on both planes. CloudHub 1.0 stock delivered only
+      50.7–58.5%: its single serialized background sender reached the intake at a flat
+      rate of about 225 records/s throughout, below what the app generated. CloudHub 2.0
+      stock's own load sat just under that rate and it delivered 100%. This is not Dynatrace
+      throttling: a 914 req/s single-record burst from a laptop got HTTP 204 for every request
+      and every record was stored. Where the undelivered CloudHub 1.0 stock records were lost is
+      not established; the timing points at the async queue rather than a restart (nothing
+      restarted after Test 4, and a queued backlog would have drained before it was counted).</li>
       <li><b>Correction to the 2026-08-04 run.</b> Its CloudHub 2.0 Datadog stock app carried a
       leftover <code>AsyncLoggerConfig.RingBufferSize=20000</code> and <code>log4j2.debug=true</code>
       that no other app had. It measured 5.75 req/s with them against 1.46 without, so the
@@ -535,16 +674,21 @@
   </div>
 
   <footer>
-    Measured 2026-10-12 on CloudHub 1.0 (0.1 vCore worker) and CloudHub 2.0 (0.1 vCore replica),
-    three vendor pairs — Datadog, New Relic and Elasticsearch — with <code>oha</code> over a
+    Measured on CloudHub 1.0 (0.1 vCore worker) and CloudHub 2.0 (0.1 vCore replica), four
+    vendor pairs — Datadog, New Relic, Elasticsearch and Dynatrace — with <code>oha</code> over a
     5-minute window (CloudHub 1.0 at -c 10, CloudHub 2.0 at -c 5, <code>/log?count=20</code> for
-    22 events per request), each app restarted and warmed before the run, three vendor lanes in
-    parallel with one app per vendor at a time. Endpoint URLs omitted intentionally.
+    22 events per request), each app restarted and warmed before the run. Datadog, New Relic and
+    Elasticsearch: 2026-10-12, three vendor lanes in parallel with one app per vendor at a time.
+    Dynatrace: 2026-10-13, its lane alone, same protocol. Endpoint URLs omitted intentionally.
     Numbers are single-run and will vary with worker load, vendor rate limits, and intake
     responsiveness; the two planes run at different concurrency and have different CPU models, so
     their tables are not comparable with each other — see the caveats above. This is a
-    GENERATED file — rebuild with <code>BENCH_RESULTS=.claude/bench-results/publish-020
-    docs/charts/generate_report_html.py</code>. Generated for
+    GENERATED file — rebuild with <code>BENCH_RESULTS=.claude/bench-results/publish-vendors
+    docs/charts/generate_report_html.py</code>. Setup and options: the
+    <a href="vendors/datadog.md">Datadog</a>, <a href="vendors/newrelic.md">New Relic</a>,
+    <a href="vendors/elasticsearch.md">Elasticsearch</a> and
+    <a href="vendors/dynatrace.md">Dynatrace</a> pages and
+    <a href="configuration.md">configuration.md</a>. Generated for
     batch-http-appender v0.2.0.
   </footer>
 

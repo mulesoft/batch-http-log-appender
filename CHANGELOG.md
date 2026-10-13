@@ -2,8 +2,39 @@
 
 All notable changes to the Batch HTTP Log Appender are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
-[Semantic Versioning](https://semver.org/). The README's "New in v0.x" notes carry the
-longer, upgrade-oriented explanation of each release.
+[Semantic Versioning](https://semver.org/). Defaults that moved between releases are listed in
+[docs/configuration.md](docs/configuration.md#defaults-that-changed).
+
+## [Unreleased]
+
+### Added
+- **Dynatrace sample Mule pair** — `demo/mule/dynatrace-batch-http` (the `<BatchHttp>` appender)
+  and `demo/mule/dynatrace-stock-http` (the stock Log4j2 `<Http>` appender, one POST per event),
+  an A/B pair matching the Datadog, New Relic and Elasticsearch demos; `scripts/deploy-ch1.sh
+  --dynatrace` deploys it (needs `DT_ENVIRONMENT_URL` and `DT_API_TOKEN`).
+- **Dynatrace CloudHub benchmark** (2026-10-13, engine 0.2.0, its lane alone, same protocol as
+  the 2026-10-12 run): batch delivered 100% in every test on both planes at 6.5× (CloudHub 1.0)
+  and 4.4× (CloudHub 2.0) the stock appender's request rate in the 5-minute Test 3. Added to
+  `docs/benchmark-results.md`, `docs/index.html` and the charts; delivery counted in Grail with
+  DQL by event time.
+- **Per-vendor documentation pages** under `docs/vendors/` (Datadog, New Relic, Elasticsearch,
+  Dynatrace, Splunk HEC, generic HTTP): setup, configuration, what gets sent, verifying delivery,
+  troubleshooting, and each vendor's CloudHub benchmark with its own charts
+  (`docs/img/vendors/`). Each page links its sample Mule project, where one exists.
+- **`docs/configuration.md`**, the single reference of every `<BatchHttp>` option (type, code
+  default, the vendors it applies to), with a stable anchor per option that every other page links.
+- **`DocumentationConsistencyTest`** (`batch-http-log4j2`): fails the build when
+  `docs/configuration.md` misses, duplicates or mis-defaults a plugin option, when an `xml`
+  sample in `README.md` or `docs/` is not well-formed or uses an attribute or enum value the
+  plugin does not accept, or when a `configuration.md#opt-...` link does not resolve.
+
+### Changed
+- `README.md` is now a short landing page: pitch, supported vendors, quick start, benchmark
+  summary and a documentation map. Its long sections moved under `docs/` (index:
+  `docs/README.md`): architecture, building, Mule usage and secrets, resilience and disk spill,
+  troubleshooting, memory safety, the option reference and the per-vendor examples. Links into
+  the moved sections were updated across the repository.
+- `docs/benchmark-results.md` and `docs/benchmark-runbook.md` cover four vendors.
 
 ## [0.2.0] — 2026-10-12
 
@@ -11,7 +42,9 @@ The minor version marks Elasticsearch as a first-class vendor alongside Datadog,
 New Relic and Dynatrace. The sink and its per-document bulk retry shipped in 0.1.5; 0.2.0 adds
 the durability and accounting work below, runs every demo with disk spill on, and republishes
 the CloudHub benchmark with all three vendors and measured log delivery. No configuration
-changes are needed to upgrade from 0.1.5.
+changes are needed to upgrade from 0.1.5. If you alert on the spill counters, read
+[Crash recovery](docs/resilience.md#crash-recovery-runtime--jvm-death) and
+[The invariant to check](docs/memory-safety.md#the-invariant-to-check) first.
 
 ### Fixed
 - **Evicted spill records are now counted.** When the spill buffer deletes its oldest segment
@@ -192,7 +225,9 @@ No appender code changed.
 
 ### Fixed
 - `corruptBytesSkipped` under-reported (`0`) for a torn trailing frame or a wholly unreadable
-  spill segment. A crash-recovery replay may now report a non-zero value where it read zero.
+  spill segment. A crash-recovery replay may now report a non-zero value where it read zero;
+  nothing regressed, the old number was under-reporting, so revisit any alert threshold set
+  against it.
 
 ## [0.1.2]
 
@@ -204,14 +239,16 @@ No appender code changed.
 
 ### Changed
 - `queueCapacity` default lowered from `100000` to `10000`, bounding worst-case queue memory
-  on small (0.1–0.2 vCore) CloudHub workers. See "Default changes — read before upgrading"
-  in the README for every default that has moved.
+  on small (0.1–0.2 vCore) CloudHub workers. See
+  [Defaults that changed](docs/configuration.md#defaults-that-changed) for every default that has
+  moved.
 
 ## [0.1.0]
 
 - Initial release: the batching Log4j2 appender (`<BatchHttp>`) on a vendor-neutral core
   engine. Pre-publication history lives in the development repository.
 
+[Unreleased]: https://github.com/mulesoft/batch-http-log-appender/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/mulesoft/batch-http-log-appender/compare/v0.1.5...v0.2.0
 [0.1.5]: https://github.com/mulesoft/batch-http-log-appender/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/mulesoft/batch-http-log-appender/releases/tag/v0.1.4

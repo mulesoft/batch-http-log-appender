@@ -9,10 +9,12 @@ script keeps index.html in lock-step with docs/benchmark-results.md and the char
 
     .venv-charts/bin/python docs/charts/generate_report_html.py
 
-The published 2026-10-12 run (engine 0.2.0, 12 apps, 3 vendors, spill on) is rebuilt with
+The published four-vendor set (engine 0.2.0, 16 apps, spill on — Datadog, New Relic and
+Elasticsearch measured 2026-10-12 in parallel lanes, Dynatrace 2026-10-13 alone with the same
+protocol) is rebuilt with
 
-    BENCH_RESULTS=.claude/bench-results/publish-020 \
-    DELIVERY_JSON=.claude/bench-results/publish-020/delivery.json \
+    BENCH_RESULTS=.claude/bench-results/publish-vendors \
+    DELIVERY_JSON=.claude/bench-results/publish-vendors/delivery.json \
     .venv-charts/bin/python docs/charts/generate_report_html.py
 
 DELIVERY_JSON (default: $BENCH_RESULTS/delivery.json) holds the measured log delivery,
@@ -34,8 +36,14 @@ REPO = DOCS.parent
 RESULTS = pathlib.Path(os.environ.get("BENCH_RESULTS", REPO / ".claude" / "bench-results"))
 DELIVERY = pathlib.Path(os.environ.get("DELIVERY_JSON", RESULTS / "delivery.json"))
 OUT = DOCS / "index.html"
-MEASURED = "2026-10-12"
 ENGINE = "0.2.0"
+# Measurement dates. Datadog, New Relic and Elasticsearch ran together as parallel lanes;
+# Dynatrace ran a day later, its lane alone, with the same protocol, sizes, region and build.
+RUNS = {"Datadog": "2026-10-12", "New Relic": "2026-10-12", "Elasticsearch": "2026-10-12",
+        "Dynatrace": "2026-10-13"}
+SLUG = {"Datadog": "datadog", "New Relic": "newrelic", "Elasticsearch": "elasticsearch",
+        "Dynatrace": "dynatrace"}
+ROUNDS = ["z1m", "z1m_churn", "z5m", "z5m_t30s"]
 
 # --- oha parsing (normalise every time field to SECONDS; handle the 1.14.0 ÷10 glitch) ---
 _UNIT = {"sec": 1.0, "ms": 1e-3, "min": 60.0, "10 sec": 10.0, "10 ms": 1e-2}
@@ -83,13 +91,12 @@ def load(label, app):
 
 
 # (plane_title, plane_tag, vendor, batch_app, stock_app, plane_key)
+_VENDORS = [("dd", "Datadog"), ("nr", "New Relic"), ("es", "Elasticsearch"), ("dt", "Dynatrace")]
+_PLANES = [("CloudHub 1.0", "0.1 vCore worker", "ch1"), ("CloudHub 2.0", "0.1 vCore replica", "ch2")]
 PAIRS = [
-    ("CloudHub 1.0", "0.1 vCore worker", "Datadog", "dd-ch1-batch", "dd-ch1-stock", "ch1"),
-    ("CloudHub 1.0", "0.1 vCore worker", "New Relic", "nr-ch1-batch", "nr-ch1-stock", "ch1"),
-    ("CloudHub 1.0", "0.1 vCore worker", "Elasticsearch", "es-ch1-batch", "es-ch1-stock", "ch1"),
-    ("CloudHub 2.0", "0.1 vCore replica", "Datadog", "dd-ch2-batch", "dd-ch2-stock", "ch2"),
-    ("CloudHub 2.0", "0.1 vCore replica", "New Relic", "nr-ch2-batch", "nr-ch2-stock", "ch2"),
-    ("CloudHub 2.0", "0.1 vCore replica", "Elasticsearch", "es-ch2-batch", "es-ch2-stock", "ch2"),
+    (title, tag, vendor, f"{v}-{key}-batch", f"{v}-{key}-stock", key)
+    for title, tag, key in _PLANES
+    for v, vendor in _VENDORS
 ]
 DELIVERY_DATA = json.loads(DELIVERY.read_text()) if DELIVERY.exists() else {}
 
@@ -122,9 +129,16 @@ def ratio(b, s):
 
 def pair_rows(b, s):
     """The metric table body for one pair (b/s carry a "delivered" key)."""
+    def lower(sv, bv):
+        """stock÷batch as "N× lower" (a batch win), or "N× higher" with no win when batch is worse."""
+        if not bv:
+            return "—"
+        return f"{sv / bv:.1f}× lower" if sv >= bv else f"{bv / sv:.1f}× higher"
+
     def row(metric, sv, bv, imp=""):
+        cls = "loss" if imp.endswith("higher") else "win"
         return (f'      <tr><td>{metric}</td><td class="stock">{sv}</td>'
-                f'<td class="batch">{bv}</td><td class="win">{imp}</td></tr>')
+                f'<td class="batch">{bv}</td><td class="{cls}">{imp}</td></tr>')
     rr = b["reqsec"] / s["reqsec"] if s["reqsec"] else 0
     return "\n".join([
         row("Requests / sec", rs(s["reqsec"]), rs(b["reqsec"]), f"{rr:.1f}×"),
@@ -133,7 +147,7 @@ def pair_rows(b, s):
         row("Success rate", f'{s["sr"]:.2f}%', f'{b["sr"]:.2f}%', ""),
         row("Logs delivered", pct(s["delivered"]), pct(b["delivered"]), ""),
         row("Average latency", ms(s["mean"]), ms(b["mean"]),
-            f'{s["mean"] / b["mean"]:.1f}× lower' if b["mean"] else "—"),
+            lower(s["mean"], b["mean"])),
         row("p50", ms(s["p50"]), ms(b["p50"]), ""),
         row("p90", ms(s["p90"]), ms(b["p90"]),
             f'{s["p90"] / b["p90"]:.0f}×' if b["p90"] else "—"),
@@ -141,7 +155,7 @@ def pair_rows(b, s):
             f'{s["p99"] / b["p99"]:.0f}×' if b["p99"] else "—"),
         row("Fastest", ms(s["fastest"]), ms(b["fastest"]), ""),
         row("Slowest", ms(s["slowest"]), ms(b["slowest"]),
-            f'{s["slowest"] / b["slowest"]:.1f}× lower' if b["slowest"] else "—"),
+            lower(s["slowest"], b["slowest"])),
     ])
 
 
@@ -166,6 +180,32 @@ def bars(b, s):
     return "\n".join(out)
 
 
+# Dynatrace CH1 stock's arrival rate at the intake, read from Grail as records/s over time
+# (flat through every test). It is an ARRIVAL rate, so it cannot be derived from the oha files
+# or from delivery.json, which counts by event time inside the oha window.
+DT_STOCK_ARRIVAL_RATE = 225
+
+
+def dt_note(key, b, s):
+    """The Dynatrace-specific reading under each Dynatrace section."""
+    gen = s["reqs"] * 22 / s["total"]  # records/s the measured requests generated
+    if key == "ch1":
+        return (f'\n  <p class="sub">Batch delivered {pct(b["delivered"])}. Stock delivered '
+                f'{pct(s["delivered"])}: its one serialized Log4j background sender reached the '
+                f'intake at a flat ~{DT_STOCK_ARRIVAL_RATE} records/s throughout, while the app '
+                f'generated about {gen:.0f} records/s in this test. '
+                'Where the undelivered stock records were lost is not established; the timing points '
+                'at the async queue rather than a restart (nothing restarted after Test 4, and a queued '
+                'backlog would have drained before it was counted). Dynatrace stock req/s is far higher than the other vendors\' '
+                'stock because a single-record POST to the in-region intake is quick, so '
+                'batch÷stock is smaller here. See <a href="vendors/dynatrace.md">the Dynatrace '
+                'page</a>.</p>')
+    return (f'\n  <p class="sub">Batch and stock both delivered 100%: this stock app\'s own load '
+            f'(about {gen:.0f} records/s in this test) sat just under the ~{DT_STOCK_ARRIVAL_RATE} '
+            'records/s its single background sender sustains. '
+            'See <a href="vendors/dynatrace.md">the Dynatrace page</a>.</p>')
+
+
 def build():
     d = {p[3]: load(HEADLINE, p[3]) for p in PAIRS}
     d.update({p[4]: load(HEADLINE, p[4]) for p in PAIRS})
@@ -178,7 +218,7 @@ def build():
         b, s = d[ba], d[sa]
         r = b["reqsec"] / s["reqsec"] if s["reqsec"] else 0
         cards.append(f'''    <div class="card">
-      <div class="label">{title} · {vendor}</div>
+      <div class="label">{title} · <a href="vendors/{SLUG[vendor]}.md">{vendor}</a></div>
       <div class="big batch">{r:.1f}× <span style="font-size:16px;color:var(--muted)">throughput</span></div>
       <div class="note">{rs(b["reqsec"])} vs {rs(s["reqsec"])} req/s &middot; batch vs stock (5-min run) &middot; logs delivered {pct(b["delivered"])} vs {pct(s["delivered"])}</div>
     </div>''')
@@ -201,7 +241,9 @@ def build():
                     f'replaced the {"worker" if key == "ch1" else "pod"}; in Test 4, the last round, it '
                     'delivered 100%. See '
                     '"New Relic results depend on location" below.</p>')
-        sections.append(f'''  <h3>{vendor} intake</h3>{note}
+        if vendor == "Dynatrace":
+            note = dt_note(key, b, s)
+        sections.append(f'''  <h3><a href="vendors/{SLUG[vendor]}.md">{vendor}</a> intake <span class="tag">— measured {RUNS[vendor]}</span></h3>{note}
   <div class="headline">
     <div class="card">
       <div class="label">Stock HttpAppender</div>
@@ -233,6 +275,14 @@ def build():
     ch2 = [d[p[3]]["reqsec"] / d[p[4]]["reqsec"] for p in PAIRS if p[5] == "ch2"]
     ch1_lo, ch1_hi = min(ch1), max(ch1)
     ch2_lo, ch2_hi = min(ch2), max(ch2)
+    # Dynatrace batch÷stock in Test 3 on both planes, against the other vendors' in the same test
+    # (Test 1 / churn mix cold start and backlog into the ratio).
+    def rr(r, app):
+        return load(r, f"{app}-batch")["reqsec"] / load(r, f"{app}-stock")["reqsec"]
+    dt_r = [rr(r, f"dt-{k}") for r in (HEADLINE,) for k in ("ch1", "ch2")]
+    oth_r = [rr(r, f"{v}-{k}") for r in (HEADLINE,) for k in ("ch1", "ch2")
+             for v in ("dd", "nr", "es")]
+    dt_ch1_stock = [delivered(r, "dt-ch1-stock") for r in ROUNDS]
     # cold-start example (CH2 Datadog batch, Test 1 -> Test 3), computed
     cold_t1 = load("z1m", "dd-ch2-batch")["reqsec"]
     cold_t3 = d["dd-ch2-batch"]["reqsec"]
@@ -243,7 +293,12 @@ def build():
         ch1_lo=f"{ch1_lo:.1f}", ch1_hi=f"{ch1_hi:.1f}",
         ch2_lo=f"{ch2_lo:.1f}", ch2_hi=f"{ch2_hi:.1f}",
         cold_t1=f"{cold_t1:.1f}", cold_t3=f"{cold_t3:.1f}",
-        measured=MEASURED, engine=ENGINE,
+        dt_lo=f"{min(dt_r):.1f}", dt_hi=f"{max(dt_r):.1f}",
+        oth_lo=f"{min(oth_r):.0f}", oth_hi=f"{max(oth_r):.0f}",
+        dt_b1=f'{d["dt-ch1-batch"]["reqsec"]:.0f}', dt_b2=f'{d["dt-ch2-batch"]["reqsec"]:.0f}',
+        dt_s_lo=f"{min(dt_ch1_stock):.1f}", dt_s_hi=f"{max(dt_ch1_stock):.1f}",
+        dt_rate=DT_STOCK_ARRIVAL_RATE,
+        engine=ENGINE,
     )
 
 
@@ -265,8 +320,8 @@ TEMPLATE = '''<!DOCTYPE html>
     limitations under the License.
 -->
 <!--
-    GENERATED FILE — do not hand-edit. Rebuild the published 2026-10-12 run with:
-        BENCH_RESULTS=.claude/bench-results/publish-020 .venv-charts/bin/python docs/charts/generate_report_html.py
+    GENERATED FILE — do not hand-edit. Rebuild the published four-vendor set with:
+        BENCH_RESULTS=.claude/bench-results/publish-vendors .venv-charts/bin/python docs/charts/generate_report_html.py
     (without BENCH_RESULTS the script reads .claude/bench-results/, which holds older rounds)
 -->
 <html lang="en">
@@ -290,6 +345,11 @@ TEMPLATE = '''<!DOCTYPE html>
   h2 {{ font-size: 20px; margin: 40px 0 12px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }}
   h2 .tag {{ font-size: 13px; color: var(--muted); font-weight: 500; letter-spacing: 0; }}
   h3 {{ font-size: 15px; margin: 24px 0 8px; }}
+  h3 .tag {{ font-size: 12px; color: var(--muted); font-weight: 500; }}
+  a {{ color: var(--accent); text-decoration: none; }}
+  a:hover {{ text-decoration: underline; }}
+  .card .label a {{ color: inherit; text-decoration: underline; text-decoration-color: var(--border); }}
+  .links {{ display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 4px 0 8px; font-size: 14px; }}
   .sub {{ color: var(--muted); margin: 0 0 24px; }}
   code {{ background: #21262d; padding: 2px 6px; border-radius: 5px; font-size: 0.88em;
          font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }}
@@ -352,25 +412,39 @@ TEMPLATE = '''<!DOCTYPE html>
 <div class="wrap">
 
   <h1>batch-http-appender — performance</h1>
-  <p class="sub">Stock Log4j2 <code>HttpAppender</code> vs. the batching HTTP appender (v{engine}), measured on twelve Mule apps — a batch/stock pair shipping to each of <b>Datadog</b>, <b>New Relic</b> and <b>Elasticsearch</b>, on both CloudHub&nbsp;1.0 and CloudHub&nbsp;2.0 — with the logs delivered counted at every vendor. Headline figures are the <b>5-minute sustained run (Test 3)</b>; see the cold-start caveat below for why the 1-minute run reads lower.</p>
+  <p class="sub">Stock Log4j2 <code>HttpAppender</code> vs. the batching HTTP appender (v{engine}), measured on sixteen Mule apps — a batch/stock pair shipping to each of <b>Datadog</b>, <b>New Relic</b>, <b>Elasticsearch</b> and <b>Dynatrace</b>, on both CloudHub&nbsp;1.0 and CloudHub&nbsp;2.0 — with the logs delivered counted at every vendor. Datadog, New Relic and Elasticsearch were measured on 2026-10-12 as three parallel lanes; Dynatrace was measured on 2026-10-13, its lane alone, with the same protocol, sizes, region and build. Headline figures are the <b>5-minute sustained run (Test 3)</b>; see the cold-start caveat below for why the 1-minute run reads lower.</p>
 
   <div class="meta">
     <span class="chip"><b>Targets:</b> CloudHub 1.0 &amp; 2.0</span>
     <span class="chip"><b>Worker:</b> 0.1 vCore</span>
-    <span class="chip"><b>Vendors:</b> Datadog, New Relic &amp; Elasticsearch</span>
+    <span class="chip"><b>Vendors:</b> Datadog, New Relic, Elasticsearch &amp; Dynatrace</span>
     <span class="chip"><b>Load:</b> oha 1.16, 5 min, CH1 -c 10 / CH2 -c 5</span>
     <span class="chip"><b>Endpoint:</b> <code>/log?count=20</code> — 22 events/request</span>
     <span class="chip"><b>Spill:</b> on</span>
-    <span class="chip"><b>Measured:</b> {measured}</span>
+    <span class="chip"><b>Measured:</b> 2026-10-12 (Datadog, New Relic, Elasticsearch) · 2026-10-13 (Dynatrace)</span>
     <span class="chip"><b>appender:</b> v{engine}</span>
+  </div>
+
+  <div class="links">
+    <span>Per-vendor setup, sample Mule project and results:</span>
+    <a href="vendors/datadog.md">Datadog</a>
+    <a href="vendors/newrelic.md">New Relic</a>
+    <a href="vendors/elasticsearch.md">Elasticsearch</a>
+    <a href="vendors/dynatrace.md">Dynatrace</a>
+    <span>·</span>
+    <a href="configuration.md">Every <code>&lt;BatchHttp&gt;</code> option</a>
+    <a href="benchmark-results.md">Full Markdown report</a>
   </div>
 
   <div class="verdict">
     Against its own stock sibling, on the same platform, shipping to the same vendor,
     the batching appender sustained a 5-minute run at
     <b>{ch1_lo}–{ch1_hi}× the request throughput on CloudHub 1.0</b> and
-    <b>{ch2_lo}–{ch2_hi}× on CloudHub 2.0</b>, and delivered every log to Datadog and
-    Elasticsearch in every test. The stock appender's synchronous
+    <b>{ch2_lo}–{ch2_hi}× on CloudHub 2.0</b>, and delivered every log to Datadog,
+    Elasticsearch and Dynatrace in every test. The low end of each range is Dynatrace: its batch
+    app ran at the same req/s as the other vendors' ({dt_b1} on CloudHub 1.0, {dt_b2} on
+    CloudHub 2.0), so the worker, not the vendor, bounds batch; but a single-record POST to its
+    in-region intake is quick, so the stock appender is penalised far less there. The stock appender's synchronous
     one-POST-per-event send holds the request thread for the whole round-trip to the intake,
     so under concurrency its single background flusher never catches up and its tail climbs
     into the multi-second — sometimes tens-of-seconds — range. The batch appender's
@@ -388,12 +462,14 @@ TEMPLATE = '''<!DOCTYPE html>
 
   <!-- ============================ Shared: methodology ============================ -->
   <h2>What was tested</h2>
-  <p>Three batch/stock pairs of functionally identical Mule 4 applications — one member of each
+  <p>Four batch/stock pairs of functionally identical Mule 4 applications — one member of each
   pair on Log4j2's stock <code>&lt;Http&gt;</code> appender, the other on this library's
   <code>&lt;BatchHttp&gt;</code> (v{engine}) — one pair shipping to the <b>Datadog</b> Logs intake
   (site <code>ap2</code>, Sydney), one to the <b>New Relic</b> Logs intake (US,
-  <code>log-api.newrelic.com</code>) and one to <b>Elasticsearch</b> (Elastic Cloud Serverless,
-  Sydney), all six deployed to <b>each</b> platform (twelve apps total). Within a pair the apps
+  <code>log-api.newrelic.com</code>), one to <b>Elasticsearch</b> (Elastic Cloud Serverless,
+  Sydney) and one to <b>Dynatrace</b> (Dynatrace SaaS on AWS, Sydney), all eight deployed to
+  <b>each</b> platform (sixteen apps total). The sample Mule projects are in the repository and
+  linked from each vendor page. Within a pair the apps
   share the same flow, the same <code>&lt;Loggers&gt;</code> wiring, and the same file appender;
   the <b>only substantive difference is the appender element</b>. The batch apps run
   <code>maxBatchRecords=200</code>, one flusher, <code>gzip="false"</code> and <b>disk spill
@@ -406,23 +482,26 @@ TEMPLATE = '''<!DOCTYPE html>
   lower concurrency to stay off its OOM ceiling. Because <code>-c</code> differs, <b>compare only
   within a plane (batch vs stock), never CloudHub 1.0 against CloudHub 2.0</b>. Every worker and
   replica runs in Sydney (<code>ap-southeast-2</code>).</p>
-  <p>The three vendors ran as <b>parallel lanes</b>, since each has its own intake, with <b>one app
-  per vendor at a time</b>: CH1 batch, CH1 stock, CH2 batch, CH2 stock, with a barrier after each
-  step. As a control, against a sequential, Elasticsearch-only run of 2026-10-11, Elasticsearch
+  <p>Datadog, New Relic and Elasticsearch ran on 2026-10-12 as <b>parallel lanes</b>, since each
+  has its own intake, with <b>one app per vendor at a time</b>: CH1 batch, CH1 stock, CH2 batch,
+  CH2 stock, with a barrier after each step. Dynatrace ran on 2026-10-13 as a <b>single lane on
+  its own</b>, with the same protocol, the same app and worker sizes, the same region and the
+  same build. As a control, against a sequential, Elasticsearch-only run of 2026-10-11, Elasticsearch
   stock req/s in the parallel lanes was within 3% on CloudHub 2.0 in the 5-minute rounds. On
   CloudHub 1.0 it was −3.3% in Test 4 and −14.6% in Test 3; an earlier parallel round of the same
   stock apps read +2.9% and −7.1% there, so a single CloudHub 1.0 stock run moves that much on its
   own. <b>Every test starts on a freshly restarted app</b> (restarts are pipelined ahead of each
   app's turn), followed by 5 light warmups and a 30 s drain. The exception is the churn window,
-  which follows Test 1 with no restart. Measured {measured}.</p>
+  which follows Test 1 with no restart.</p>
   <p><b>Logs delivered</b> is the logs that reached the vendor divided by the logs the measured
   requests generated (HTTP 200 responses × 22). Elasticsearch is counted by event time inside
-  the <code>oha</code> window. Datadog and New Relic are counted by arrival time, from the test's
+  the <code>oha</code> window, and so is Dynatrace (in Grail, with DQL, by
+  <code>log.source</code>). Datadog and New Relic are counted by arrival time, from the test's
   start to the next test on the same app: the demos omit the vendors' reserved event-time
   attribute on purpose, so the vendor stamps arrival. A value over 100% is late backlog from an
   earlier test arriving in the window, or log lines of requests <code>oha</code> cut off.</p>
   <p>Each 5-minute run shown here independently corroborates the load parameters: requests/sec ×
-  mean latency ≈ the plane's concurrency (Little's Law) holds within 8% across all twelve. It does
+  mean latency ≈ the plane's concurrency (Little's Law) holds within 8% across all sixteen. It does
   not hold for every run in the full report: where requests fail or time out (Test 4, New Relic
   on CloudHub 1.0 in the churn window) or a long stock tail drains past the deadline (the
   1-minute tests), the product falls below <code>-c</code>. The parsers still normalise the
@@ -460,9 +539,9 @@ TEMPLATE = '''<!DOCTYPE html>
       <li><b>New Relic results depend on location.</b> The workers run in Sydney
       (<code>ap-southeast-2</code>), next to Datadog's <code>ap2</code> site and the
       Elasticsearch project. New Relic offers only US and EU regions; these apps ship to the US
-      endpoint (<code>log-api.newrelic.com</code>), so every batch crosses the Pacific and the
-      backlog drains at about 330 logs/s. Requests/sec measures how responsive the app stays, not
-      how many logs arrive. New Relic batch delivered about 96–107% in Test 1 and churn, 44.5%
+      endpoint (<code>log-api.newrelic.com</code>), so every batch crosses the Pacific (on
+      CloudHub 1.0 in Test 3 the backlog drained at about 330 logs/s). Requests/sec measures how
+      responsive the app stays, not how many logs arrive. New Relic batch delivered about 96–107% in Test 1 and churn, 44.5%
       (CloudHub 1.0) and 77.3% (CloudHub 2.0) in Test 3, and 100% in Test 4. The Test 3 shortfall
       is a restart, not a drop: the 5-minute burst spilled to disk faster than the US intake took
       it, and the backlog was still draining when the next round's restart replaced the worker
@@ -470,8 +549,21 @@ TEMPLATE = '''<!DOCTYPE html>
       spill files went with it. Test 4 was the last round; nothing restarted after it, and its
       backlog drained in about 12 minutes. Workers closer to the New Relic region, or
       <code>gzip</code> plus more <code>flusherThreads</code>, ship faster.</li>
-      <li><b>Stock loses its backlog at every restart.</b> Stock delivered 14–83% of its logs in
-      Test 1 and Test 3: what is still queued in memory when the next restart comes is gone.</li>
+      <li><b>Stock loses its backlog at every restart.</b> At Datadog, New Relic and
+      Elasticsearch, stock delivered 14–83% of its logs in Test 1 and Test 3: what is still queued
+      in memory when the next restart comes is gone.</li>
+      <li><b>Dynatrace was measured a day later, on its own.</b> Same protocol, sizes, region and
+      build as the other three, but run 2026-10-13 as the only lane. Its batch÷stock is only
+      {dt_lo}–{dt_hi}× in Test 3 (the other vendors: {oth_lo}–{oth_hi}×) because a
+      single-record POST to the in-region Dynatrace intake takes about 4.4 ms, so the stock appender is penalised far less; batch req/s is the same as elsewhere.
+      Batch delivered 100% in every test on both planes. CloudHub 1.0 stock delivered only
+      {dt_s_lo}–{dt_s_hi}%: its single serialized background sender reached the intake at a flat
+      rate of about {dt_rate} records/s throughout, below what the app generated. CloudHub 2.0
+      stock's own load sat just under that rate and it delivered 100%. This is not Dynatrace
+      throttling: a 914 req/s single-record burst from a laptop got HTTP 204 for every request
+      and every record was stored. Where the undelivered CloudHub 1.0 stock records were lost is
+      not established; the timing points at the async queue rather than a restart (nothing
+      restarted after Test 4, and a queued backlog would have drained before it was counted).</li>
       <li><b>Correction to the 2026-08-04 run.</b> Its CloudHub 2.0 Datadog stock app carried a
       leftover <code>AsyncLoggerConfig.RingBufferSize=20000</code> and <code>log4j2.debug=true</code>
       that no other app had. It measured 5.75 req/s with them against 1.46 without, so the
@@ -481,16 +573,21 @@ TEMPLATE = '''<!DOCTYPE html>
   </div>
 
   <footer>
-    Measured {measured} on CloudHub 1.0 (0.1 vCore worker) and CloudHub 2.0 (0.1 vCore replica),
-    three vendor pairs — Datadog, New Relic and Elasticsearch — with <code>oha</code> over a
+    Measured on CloudHub 1.0 (0.1 vCore worker) and CloudHub 2.0 (0.1 vCore replica), four
+    vendor pairs — Datadog, New Relic, Elasticsearch and Dynatrace — with <code>oha</code> over a
     5-minute window (CloudHub 1.0 at -c 10, CloudHub 2.0 at -c 5, <code>/log?count=20</code> for
-    22 events per request), each app restarted and warmed before the run, three vendor lanes in
-    parallel with one app per vendor at a time. Endpoint URLs omitted intentionally.
+    22 events per request), each app restarted and warmed before the run. Datadog, New Relic and
+    Elasticsearch: 2026-10-12, three vendor lanes in parallel with one app per vendor at a time.
+    Dynatrace: 2026-10-13, its lane alone, same protocol. Endpoint URLs omitted intentionally.
     Numbers are single-run and will vary with worker load, vendor rate limits, and intake
     responsiveness; the two planes run at different concurrency and have different CPU models, so
     their tables are not comparable with each other — see the caveats above. This is a
-    GENERATED file — rebuild with <code>BENCH_RESULTS=.claude/bench-results/publish-020
-    docs/charts/generate_report_html.py</code>. Generated for
+    GENERATED file — rebuild with <code>BENCH_RESULTS=.claude/bench-results/publish-vendors
+    docs/charts/generate_report_html.py</code>. Setup and options: the
+    <a href="vendors/datadog.md">Datadog</a>, <a href="vendors/newrelic.md">New Relic</a>,
+    <a href="vendors/elasticsearch.md">Elasticsearch</a> and
+    <a href="vendors/dynatrace.md">Dynatrace</a> pages and
+    <a href="configuration.md">configuration.md</a>. Generated for
     batch-http-appender v{engine}.
   </footer>
 

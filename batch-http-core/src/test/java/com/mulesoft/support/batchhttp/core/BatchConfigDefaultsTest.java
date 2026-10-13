@@ -23,7 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Pins the batching defaults an embedding gets when it configures nothing. These four are
- * documented in the README's attribute tables and set the flush trigger, the wire encoding,
+ * documented in docs/configuration.md's option tables and set the flush trigger, the wire encoding,
  * and whether the engine touches the local filesystem at all for every deployment that leaves
  * them unset, so a change here is a behaviour change for every such app — it must be
  * deliberate, not a side effect of editing the builder.

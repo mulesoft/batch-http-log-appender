@@ -84,7 +84,8 @@ a CloudHub 1.0 deployment from a CloudHub 2.0 one. It is set to the CloudHub app
 name, `${sys:domain:-dynatrace-batch-http}`:
 
 - **CloudHub 1.0** sets the `domain` system property to the application name on every app,
-  for example `dynatrace-batch-http-poc`. Nothing to configure.
+  for example `dynatrace-batch-http` plus any `$CH1_APP_SUFFIX` you deployed with. Nothing to
+  configure.
 - **CloudHub 2.0** does not. Add an application property `domain=dynatrace-batch-http`
   (or whatever the app is called there).
 - **Locally** it falls back to `dynatrace-batch-http`.
@@ -109,12 +110,13 @@ DQL in a notebook:
 
 ```text
 fetch logs
-| filter log.source == "dynatrace-batch-http-poc"
+| filter log.source == "dynatrace-batch-http"
 | sort timestamp desc
 ```
 
-Use the name the deployment actually carries: `dynatrace-batch-http-poc` style on CloudHub 1.0,
-the `domain` property's value on CloudHub 2.0, `dynatrace-batch-http` locally.
+Use the name the deployment actually carries: the application name on CloudHub 1.0 (the module
+name plus any `$CH1_APP_SUFFIX`), the `domain` property's value on CloudHub 2.0, and
+`dynatrace-batch-http` locally.
 
 ### Counting with DQL
 
@@ -127,7 +129,7 @@ curl -s -X POST \
   "https://<environment-id>.apps.dynatrace.com/platform/storage/query/v1/query:execute" \
   -H "Authorization: Bearer $DT_PLATFORM_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"query":"fetch logs, from:now()-1h | filter log.source == \"dynatrace-batch-http-poc\" | summarize count()"}'
+  -d '{"query":"fetch logs, from:now()-1h | filter log.source == \"dynatrace-batch-http\" | summarize count()"}'
 ```
 
 A query that does not finish within the request returns `"state":"RUNNING"` and a
@@ -151,7 +153,9 @@ Each log event becomes one Dynatrace log record:
 
 Dynatrace stores `content` as text. To get `event`, `orderId`, `platform` and friends as
 attributes, add an OpenPipeline processing rule (a DQL processor with `parse content, "JSON:mule"`
-or similar) for records matching `log.source` of either app. Apply it to both apps of the
+or similar) for records matching `log.source` of either app. `JSON:mule` puts the parsed object
+into one record field named `mule` (`mule[orderId]`, …); add a `fieldsFlatten mule` step to get
+top-level attributes. Apply it to both apps of the
 pair alike; they ship the identical `content` string, so they stay comparable either way.
 
 ## Failures

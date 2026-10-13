@@ -16,17 +16,15 @@ WORKER_SIZE=0.1
 RUNTIME=4.9.15
 JAVA_VERSION=17
 
-# The original benchmark drove CloudHub 1.0 over plain http and CloudHub 2.0 over https, so the
-# two planes were never measured over the same transport. The published protocol equalises on
-# plain http for both planes (README.md, docs/index.html).
+# Scheme for the printed CloudHub 1.0 load URLs. The published protocol (docs/benchmark-results.md)
+# drives CloudHub 1.0 over plain http and CloudHub 2.0 over https.
 SCHEME=${SCHEME:-http}
 
-# Load parameters the published protocol uses on BOTH planes, identical on each: 5 concurrent
-# connections against /log?count=15, i.e. 17 log events per request. Printed at the end so the
-# two halves of the benchmark cannot drift apart again -- driving each plane with different
-# parameters is what made the original run's two platform tables incomparable.
-LOAD_CONC=${LOAD_CONC:-5}
-LOAD_COUNT=${LOAD_COUNT:-15}
+# CloudHub 1.0 load parameters of the published protocol: 10 concurrent connections against
+# /log?count=20, i.e. 22 log events per request (CloudHub 2.0 runs the same count= at -c 5 over
+# https). Printed at the end so a re-run uses the published parameters.
+LOAD_CONC=${LOAD_CONC:-10}
+LOAD_COUNT=${LOAD_COUNT:-20}
 
 # How long to wait for an app to reach STARTED, and how often to re-check.
 START_TIMEOUT_SECONDS=${START_TIMEOUT_SECONDS:-900}
@@ -66,7 +64,7 @@ Selection (default: the Datadog pair):
   --newrelic         newrelic-batch-http$SUFFIX newrelic-stock-http$SUFFIX
   --elastic          elastic-batch-http$SUFFIX  elastic-stock-http$SUFFIX
   --dynatrace        dynatrace-batch-http$SUFFIX dynatrace-stock-http$SUFFIX
-  --all              the Datadog and New Relic pairs (the published benchmark)
+  --all              the Datadog and New Relic pairs
   APP ...            explicit app names, overriding the flags above
                      (or set APPS="datadog-batch-http-x datadog-stock-http-x" in the environment)
 
@@ -89,9 +87,9 @@ Required environment:
 
 Optional environment:
   CH1_APP_SUFFIX           suffix the deployed CloudHub 1.0 apps carry; default empty
-  SCHEME                   scheme for the printed load URLs, default http (both planes)
-  LOAD_CONC                oha -c value printed in the summary, default 5
-  LOAD_COUNT               /log?count= value printed in the summary, default 15 (17 log events)
+  SCHEME                   scheme for the printed load URLs, default http (CloudHub 1.0)
+  LOAD_CONC                oha -c value printed in the summary, default 10 (CloudHub 1.0)
+  LOAD_COUNT               /log?count= value printed in the summary, default 20 (22 log events)
   START_TIMEOUT_SECONDS    default 900
   POLL_INTERVAL_SECONDS    default 15
   ANYPOINT_CLI             CLI executable, default anypoint-cli-v4
@@ -436,10 +434,9 @@ fi
 printf '\n%-22s %-10s %-16s %-8s %-10s %s\n' APP STATUS REGION VCORES RUNTIME URL
 printf '%s\n' "${SUMMARY[@]}"
 printf '\nAll apps report region %s. Record it in the report per runbook §8.\n' "$REGION"
-printf 'Prime each app with 5 warmup requests and a 10 s pause, then measure:\n'
-printf '  oha --no-tui -z 1m -c %s <url>/log?count=%s\n' "$LOAD_CONC" "$LOAD_COUNT"
-printf 'Run paired-parallel, one vendor per side; never two apps against the same vendor intake.\n'
-printf 'Use the same -c and count= on CloudHub 2.0. Different parameters per plane are what made\n'
-printf 'the two platform tables of the original run incomparable (runbook §11).\n'
+printf 'Restart each app fresh, prime it with 5 warmup requests at count=1 and a 30 s drain, then measure:\n'
+printf '  oha --no-tui -z 5m -c %s <url>/log?count=%s\n' "$LOAD_CONC" "$LOAD_COUNT"
+printf 'Run one app per vendor at a time; never two apps against the same vendor intake.\n'
+printf 'CloudHub 2.0 runs the same count= at -c 5 over https (docs/benchmark-results.md).\n'
 printf 'Validate every result with Little'"'"'s Law before recording it: req/s x avg latency ~ -c,\n'
 printf 'and total run ~ 60s; oha 1.14.0 can print latencies 10x low (runbook §7).\n'

@@ -244,7 +244,7 @@ crash are replayed on the next startup.
 the library default. Nothing touches disk on the happy path; records are written to rotating
 segment files only when a batch fails after retries are exhausted, or when the queue would
 overflow (`spillOnOverflow="true"`). The overload signal is therefore **`spilledRecords`** in the
-stats heartbeat, as the root README's spill section describes. Records lost because the spill
+stats heartbeat, as [Disk-spill buffer](../../../docs/resilience.md#disk-spill-buffer) describes. Records lost because the spill
 buffer itself is full land in `spillStats().droppedRecords` (`evictedRecords` for an evicted
 oldest segment), never in `dropped`, which counts terminal rejections (a 4xx) and serialization
 failures. The buffer is bounded (512 MiB total, with a 256 MiB
@@ -330,5 +330,5 @@ the failed batches are dropped and counted instead, and nothing appears on disk.
    oldest) and the files disappear as each segment ships successfully — the buffered logs
    then show up in New Relic.
 
-See the repo root README's **Disk-spill buffer** section for the full attribute
-reference and tuning notes.
+See [Disk-spill buffer](../../../docs/resilience.md#disk-spill-buffer) for the tuning notes and
+the [spill options](../../../docs/configuration.md#disk-spill) for the full attribute reference.

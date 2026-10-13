@@ -4,21 +4,25 @@ SPDX-License-Identifier: Apache-2.0
 
 # CloudHub benchmark runbook
 
-How to reproduce (or re-run) the **"Measured on CloudHub (real Datadog, New Relic and Elasticsearch intake)"**
-figures in [`../README.md`](../README.md) and the full report in
-[`benchmark-results.md`](benchmark-results.md) / [`index.html`](index.html).
+How to reproduce (or re-run) the CloudHub benchmark of the batch appender against the stock
+`<Http>` appender at **Datadog, New Relic, Elasticsearch and Dynatrace** — summarised on the
+[landing page](../README.md#benchmarks) and on each [vendor page](README.md#pick-your-vendor),
+and reported in full in [`benchmark-results.md`](benchmark-results.md) / [`index.html`](index.html).
 
 This is the operator-facing **manual single-run** procedure: `oha` against `/log?count=20` — 22
 log events per request — over plain `http` on CloudHub 1.0 and `https` on CloudHub 2.0, after a
 warmup, driven paired-parallel with one vendor per side. §7 is the authoritative statement of it; §6 is where you confirm it before
-measuring. **Note on provenance:** the currently published figures (2026-10-12, engine 0.2.0,
-twelve apps across Datadog, New Relic and Elasticsearch, spill on) were produced by the automated
+measuring. **Note on provenance:** the currently published figures (engine 0.2.0, spill on;
+Datadog, New Relic and Elasticsearch on 2026-10-12, Dynatrace on 2026-10-13; sixteen apps in all)
+were produced by the automated
 **4-test** harness (Test 1 = 1 min, Test 2 = in-thread churn, Test 3 = 5 min sustained — the
 headline — and Test 4 = 5 min with a 30 s per-request cap), which restarts and warms every app
 before each test, drives **plane-specific concurrency (CloudHub 1.0 at `-c 10`, CloudHub 2.0 at
-`-c 5`)**, and runs the three vendors as parallel lanes with one app per vendor at a time. The
-manual recipe below still describes a two-vendor pairing per phase; add the Elasticsearch app as
-a third, concurrent lane. The manual recipe below is the equivalent single-run path;
+`-c 5`)**, and runs the vendors as parallel lanes with one app per vendor at a time — three lanes
+(Datadog, New Relic, Elasticsearch) on 2026-10-12, the Dynatrace lane alone on 2026-10-13. The
+manual recipe below still describes a two-vendor pairing per phase; add the Elasticsearch and
+Dynatrace apps as further concurrent lanes, one app per vendor. The manual recipe below is the
+equivalent single-run path;
 where it and the harness differ, the harness is authoritative — follow the plane-specific `-c`
 and `count=20` here so a manual re-run stays comparable.
 
@@ -28,9 +32,11 @@ spill accounting) while the POM version stayed at `0.1.3`, so `0.1.3` alone cann
 code produced a number. Re-run from source, record the commit, and republish.
 
 > **Provenance — which figures this runbook describes.** The figures in
-> [`../README.md`](../README.md), [`benchmark-results.md`](benchmark-results.md) and
-> [`index.html`](index.html) are the run of **2026-10-12** (engine 0.2.0, twelve apps, three
-> vendors, spill on, logs delivered counted at each vendor), produced by the automated **4-test**
+> [`benchmark-results.md`](benchmark-results.md), [`index.html`](index.html), the vendor pages
+> and the [landing page](../README.md#supported-vendors) are the run of **2026-10-12** (engine
+> 0.2.0, twelve apps, three vendors — Datadog, New Relic, Elasticsearch) plus the Dynatrace run of
+> **2026-10-13** (four apps, its lane alone, with the same protocol, sizes, region and build) — spill
+> on, logs delivered counted at each vendor — produced by the automated **4-test**
 > harness (see the note above): the headline is **Test 3**, a 5-minute sustained run at
 > plane-specific concurrency (CloudHub 1.0 `-c 10` over `http`, CloudHub 2.0 `-c 5` over `https`)
 > against `/log?count=20` (22 log events/request). It supersedes the run of **2026-08-04**, whose
@@ -78,15 +84,20 @@ code produced a number. Re-run from source, record the commit, and republish.
 | 8 | **`oha`** | `brew install oha`. The published 2026-10-12 run used `oha 1.16`; 1.14.0 has the latency display glitch described in §7, so check your version before you measure. |
 | 9 | **Connected App** | Needed for `anypoint-cli-v4` under `client_credentials`. Every Runtime Manager scope is **environment-scoped**, so an app that holds the right scopes but was never attached to the target environment authenticates cleanly and then 403s on every Runtime Manager call. Grant, at organization level, **View Organization** (`read:organization`) and **CloudHub Organization Admin** (`admin:cloudhub`); and per environment, **View Environment**, **Create Applications**, **Read Applications**, **Manage Settings**, and **Delete Applications** (the last for cleanup). Verify as §4 describes. |
 
-Also required, not optional: a **New Relic ingest key** and an **Elasticsearch** endpoint with an
-API key (the published run used Elastic Cloud Serverless in Sydney). The published run drives the
-three vendors as parallel lanes, one app per vendor at a time, so a full reproduction needs all
-three vendors' credentials and all six apps on each plane — twelve in total. The manual recipe
-below (§7) pairs two vendors per phase; add the Elasticsearch app as a third, concurrent lane.
+Also required, not optional: a **New Relic ingest key**, an **Elasticsearch** endpoint with an
+API key (the published run used Elastic Cloud Serverless in Sydney), and a **Dynatrace**
+environment URL with an access token that holds only the `logs.ingest` scope (the published run
+used Dynatrace SaaS on AWS Sydney). Counting what reached Dynatrace needs a second, separate
+Dynatrace **platform token** with `storage:logs:read` and `storage:buckets:read` (§8); the apps
+never use it, so keep it out of their properties. The published run drives the vendors as
+parallel lanes, one app per vendor at a time, so a full reproduction needs all four vendors'
+credentials and all eight apps on each plane — sixteen in total (the published Dynatrace lane ran
+on its own, a day after the other three). The manual recipe below (§7) pairs two vendors per
+phase; add the Elasticsearch and Dynatrace apps as further concurrent lanes.
 As with `dd.site`, the New Relic Log API host (`nr.logHost` / `NEW_RELIC_LOG_HOST`) must be
-**the same value on both apps of the New Relic pair, or unset on both**, and the two
-Elasticsearch apps must ship to the same project — a pair whose halves ship to different regions
-is not a comparison.
+**the same value on both apps of the New Relic pair, or unset on both**, the two
+Elasticsearch apps must ship to the same project, and the two Dynatrace apps to the same
+environment — a pair whose halves ship to different regions is not a comparison.
 
 With only one vendor's key you can still measure that vendor's pair, but the phases then hold a
 single app each and must run **one at a time**, because both halves of a pair share one intake and
@@ -109,16 +120,17 @@ mvn -B clean install                     # installs batch-http-core + batch-http
 The build enforces license headers at `validate` and the tests bind localhost sockets, so run
 it with normal (unsandboxed) network and filesystem access.
 
-Expect **131 tests to pass** — 117 in `batch-http-core` and 14 in `batch-http-log4j2`. Check the
+Expect **204 tests to pass** at the current commit — 185 in `batch-http-core` and 19 in
+`batch-http-log4j2` (the counts move as tests are added; compare against the commit you record). Check the
 counts rather than only the `BUILD SUCCESS` line, so that tests silently ceasing to run is
 visible rather than mistaken for a clean build.
 
-Then build the six Mule deployables. They are **not** modules of the root reactor, so each is
+Then build the eight Mule deployables. They are **not** modules of the root reactor, so each is
 a separate invocation:
 
 ```bash
 for d in datadog-batch-http datadog-stock-http newrelic-batch-http newrelic-stock-http \
-         elastic-batch-http elastic-stock-http; do
+         elastic-batch-http elastic-stock-http dynatrace-batch-http dynatrace-stock-http; do
   (cd "demo/mule/$d" && mvn -B clean package)
 done
 ```
@@ -133,6 +145,8 @@ Artifacts (`mule-application` jars):
 | `newrelic-stock-http` | `demo/mule/newrelic-stock-http/target/mule-newrelic-stock-http-demo-1.0.0-SNAPSHOT-mule-application.jar` |
 | `elastic-batch-http` | `demo/mule/elastic-batch-http/target/mule-elastic-demo-1.0.0-SNAPSHOT-mule-application.jar` |
 | `elastic-stock-http` | `demo/mule/elastic-stock-http/target/mule-elastic-stock-http-demo-1.0.0-SNAPSHOT-mule-application.jar` |
+| `dynatrace-batch-http` | `demo/mule/dynatrace-batch-http/target/mule-dynatrace-demo-1.0.0-SNAPSHOT-mule-application.jar` |
+| `dynatrace-stock-http` | `demo/mule/dynatrace-stock-http/target/mule-dynatrace-stock-http-demo-1.0.0-SNAPSHOT-mule-application.jar` |
 
 Refresh `demo/mule/deployable/` from this build. Those clean-named copies are what §4 and §5
 deploy, so they are also what the checks below verify:
@@ -140,7 +154,7 @@ deploy, so they are also what the checks below verify:
 ```bash
 mkdir -p demo/mule/deployable
 for app in datadog-batch-http datadog-stock-http newrelic-batch-http newrelic-stock-http \
-           elastic-batch-http elastic-stock-http; do
+           elastic-batch-http elastic-stock-http dynatrace-batch-http dynatrace-stock-http; do
   cp "$(ls demo/mule/$app/target/*-mule-application.jar)" "demo/mule/deployable/$app.jar"
 done
 ```
@@ -167,7 +181,7 @@ WORK="$(mktemp -d)"          # outside the repo, so nothing is extracted into th
 
 for m in batch-http-core batch-http-log4j2; do
   built="$(md5 -q "$m/target/$m-$VER.jar")"
-  for app in datadog-batch-http newrelic-batch-http elastic-batch-http; do
+  for app in datadog-batch-http newrelic-batch-http elastic-batch-http dynatrace-batch-http; do
     entry="repository/com/mulesoft/support/batchhttp/$m/$VER/$m-$VER.jar"
     unzip -o -q "demo/mule/deployable/$app.jar" "$entry" -d "$WORK/$app"
     bundled="$(md5 -q "$WORK/$app/$entry")"
@@ -182,11 +196,11 @@ rm -rf "$WORK"
 Every line must read `OK`. The jar in each module's `target/` is the same one `mvn install` put
 in `~/.m2/repository`, so either copy works as the left-hand side.
 
-The three stock apps are the control: they must run on the Mule container's stock Log4j2 and
+The four stock apps are the control: they must run on the Mule container's stock Log4j2 and
 bundle **no** appender of their own.
 
 ```bash
-for app in datadog-stock-http newrelic-stock-http; do
+for app in datadog-stock-http newrelic-stock-http elastic-stock-http dynatrace-stock-http; do
   jar="demo/mule/deployable/$app.jar"
   printf '%-22s batch-http jars: %s   log4j jars: %s\n' "$app" \
     "$(unzip -l "$jar" | grep -c 'batch-http.*\.jar$')" \
@@ -194,7 +208,7 @@ for app in datadog-stock-http newrelic-stock-http; do
 done
 ```
 
-Both counts must be zero for both apps. One true-but-confusing detail to expect: the stock
+Both counts must be zero for every stock app. One true-but-confusing detail to expect: the stock
 deployables **do** contain `META-INF/maven/com.mulesoft.support.batchhttp/…` entries. That is
 only the demo app's own Maven groupId coordinates, not a bundled appender, and it is not
 contamination.
@@ -204,7 +218,7 @@ the figures you publish (§8). Do not carry a digest forward from an earlier bui
 record of *that* build and nothing more, since a later build of identical source will not
 reproduce it — which is exactly why the within-build comparison above is the check that counts.
 
-> `demo/mule/deployable/` holds the four deployables §4 and §5 deploy. The folder is
+> `demo/mule/deployable/` holds the eight deployables §4 and §5 deploy. The folder is
 > **gitignored** (a blanket `*.jar`), so it is absent from a fresh clone and never appears in
 > `git status` — the artifacts cannot be obtained by cloning, only by building. Its clean
 > filenames are the trap: nothing about a jar sitting there tells you which source produced it,
@@ -216,9 +230,14 @@ reproduce it — which is exactly why the within-build comparison above is the c
 
 ## 3. Properties each app needs
 
-`log4j2.xml` is parsed by **Log4j2, not Mule**. Mule application properties and
-`secure::` properties are invisible to it. Everything below must arrive as a **JVM system
-property** (`-D…`) or an **environment variable** — not as a Mule application property.
+`log4j2.xml` is parsed by **Log4j2, not Mule**. A value that exists only inside Mule — a Mule
+properties file or a `secure::` placeholder — is invisible to it. Everything below must reach the
+JVM as a **system property** or an **environment variable**. A Runtime Manager application
+property does on CloudHub 1.0, which surfaces it as a JVM system property (that is what
+`scripts/deploy-ch1.sh` relies on, and why the §4 note about falling back to JVM arguments exists);
+the Elasticsearch and Dynatrace demo READMEs rely on CloudHub passing application properties to the
+JVM the same way on CloudHub 2.0. See
+[Injecting secrets](mule.md#injecting-secrets-api-keys--tokens).
 
 ### Datadog pair
 
@@ -237,7 +256,7 @@ works. Prefer the JVM arg on CloudHub.
 
 > **`app.platform` must be set by hand in Runtime Manager on CloudHub 1.0.**
 > `scripts/deploy-ch1.sh` passes only the vendor key as a `--property` (plus `elastic.url` for
-> the Elasticsearch pair) — so an app
+> the Elasticsearch pair and `dynatrace.url` for the Dynatrace pair) — so an app
 > deployed through it reports `platform: unspecified` until you add `app.platform` yourself in
 > Runtime Manager's **Properties** tab (CloudHub 1.0 surfaces those as JVM system properties) and
 > restart. Do that for **every** CloudHub 1.0 app you deploy through the script — both halves of
@@ -254,6 +273,31 @@ Same shape, with `newrelic.apiKey` / `NEW_RELIC_API_KEY`, `nr.hostname`, and `nr
 `dd.site`, and subject to the same rule: **both apps of the New Relic pair must agree on
 `nr.logHost`**, same value on both or unset on both. `app.service` and `app.platform` behave
 identically, `app.platform` included in the manual-step caveat above.
+
+### Elasticsearch pair
+
+| Property | Where it goes | Value | Required? |
+| --- | --- | --- | --- |
+| `elastic.url` (or env `ELASTIC_URL`) | application property | the Elasticsearch endpoint (scheme, host, optional port) | **Yes.** Unset, it falls back to a reserved `.invalid` host, so the app fails DNS loudly instead of shipping anywhere. |
+| `elastic.apiKey` (or env `ELASTIC_API_KEY`) | **secure** application property | the base64 "encoded" API key | **Yes.** Unset, it ships the literal `MISSING_KEY`. |
+| `elastic.dataStream` | application property | leave unset | Defaults to `logs-mule-default`. Same value on both apps, or the delivery count has to look in two places. |
+| `app.service`, `app.platform` | JVM arg | as for the Datadog pair | `app.service` becomes ECS `service.name`, the facet that separates the two **apps**; `app.platform` separates the planes, with the same manual-step caveat on CloudHub 1.0. |
+
+Both apps must ship to the **same project**. Delivery is counted by event time inside the `oha`
+window (§8). The demo READMEs list the API key privileges.
+
+### Dynatrace pair
+
+| Property | Where it goes | Value | Required? |
+| --- | --- | --- | --- |
+| `dynatrace.url` (or env `DT_ENVIRONMENT_URL`) | application property | the environment's API URL (the `*.live.dynatrace.com` form, or the ActiveGate `/e/<environment-id>` form) — not the `*.apps.dynatrace.com` UI address | **Yes.** Unset, it falls back to a reserved `.invalid` host. Give the **stock** app the bare environment URL, no trailing slash and no path: the stock appender appends `/api/v2/logs/ingest` without normalising it. |
+| `dynatrace.token` (or env `DT_API_TOKEN`) | **secure** application property | an access token with **only** the `logs.ingest` scope | **Yes.** Unset, it ships the literal `MISSING_TOKEN`, which Dynatrace refuses with `401`. |
+| `domain` | application property, **CloudHub 2.0 only** | the app's name, e.g. `dynatrace-batch-http` | Sets `log.source`, the one identity the Dynatrace sink sends — so it is what separates the batch app from its stock sibling and one plane from the other, and what the §8 DQL count filters on. CloudHub 1.0 sets `domain` to the application name on every app; CloudHub 2.0 does not. To drop an override, delete the property rather than clearing it. |
+| `app.platform` | JVM arg | `cloudhub-1.0` / `cloudhub-2.0` | As for the Datadog pair, manual-step caveat included. |
+
+The Dynatrace sink has no `service` or `host` field, so `app.service` plays no part here. Both apps
+must ship to the **same environment**. The platform token used for counting (§1) is not an app
+property.
 
 ### Where to put the JVM args
 
@@ -276,19 +320,20 @@ once with `anypoint-cli-v4 conf` or the `ANYPOINT_*` environment variables.
 assertion, the hostname capture below, and polling until each app reports `STARTED`:
 
 ```bash
-scripts/deploy-ch1.sh [--dry-run] [--datadog | --newrelic | --elastic | --all] [APP ...]
+scripts/deploy-ch1.sh [--dry-run] [--datadog | --newrelic | --elastic | --dynatrace | --all] [APP ...]
 ```
 
 It defaults to the Datadog pair, and reads `ANYPOINT_CLIENT_ID`, `ANYPOINT_CLIENT_SECRET`,
 `ANYPOINT_ORG`, `ANYPOINT_ENV`, `REGION` and `DD_KEY` from the environment (`NR_KEY` only when a
-New Relic app is selected; `ELASTIC_URL` and `ELASTIC_KEY` only for `--elastic`). The published
-protocol needs **both** vendor pairs on this plane, so run it with **`--all`** (the Datadog and New
-Relic pairs) and both keys exported. `--dry-run` prints the exact commands with secrets
+New Relic app is selected; `ELASTIC_URL` and `ELASTIC_KEY` only for `--elastic`;
+`DT_ENVIRONMENT_URL` and `DT_API_TOKEN` only for `--dynatrace`). The published protocol needs
+**all four** vendor pairs on this plane: **`--all`** deploys the Datadog and New Relic pairs (with
+both keys exported), and `--elastic` and `--dynatrace` deploy the other two. `--dry-run` prints the exact commands with secrets
 masked. The explicit commands below stay in the runbook regardless: they document what the script
 does, and you need them for the CloudHub 2.0 side and for debugging.
 
 Note what the script does **not** do: it passes only the vendor credential as a `--property` (plus `elastic.url` for the
-Elasticsearch pair), so
+Elasticsearch pair and `dynatrace.url` for the Dynatrace pair), so
 every app it deploys still needs `app.platform` set by hand afterwards (§3).
 
 > **Target the apps that are already deployed, or you will benchmark a parallel copy.** The
@@ -296,7 +341,8 @@ every app it deploys still needs `app.platform` set by hand afterwards (§3).
 > application name *is* the public hostname label — deploying the same jar under a different
 > name creates a second, independent app rather than replacing the first. The deployed names are
 > the module names (`datadog-batch-http`, `datadog-stock-http`, `newrelic-batch-http`,
-> `newrelic-stock-http`) carrying a **deployment-specific suffix**, which is recorded in the
+> `newrelic-stock-http`, `elastic-batch-http`, `elastic-stock-http`, `dynatrace-batch-http`,
+> `dynatrace-stock-http`) carrying a **deployment-specific suffix**, which is recorded in the
 > operator's local harness and is deliberately not written down here. Export it before
 > deploying, so the script and the commands below address the existing apps:
 >
@@ -427,7 +473,9 @@ Two options:
    Runtime `4.9.15`, Java 17 → add the API key **and `app.platform=cloudhub-2.0`** under
    environment variables or JVM arguments. Unlike the scripted CloudHub 1.0 path, CH2 lets you set
    both at deploy time, so there is no follow-up manual step here — but it is just as easy to
-   forget, and an unset `app.platform` reads `unspecified` (§3). Repeat for the stock app.
+   forget, and an unset `app.platform` reads `unspecified` (§3). Repeat for the stock app, and
+   for every other pair with its own properties (§3). The Dynatrace pair also needs `domain` set
+   to the app's name here, or both apps report the same fallback `log.source`.
 
 2. **`mule-maven-plugin` `cloudhub2Deployment`** — the plugin is already on each app
    (`4.10.0`) but is configured with `<classifier>` only, **no deployment block**. You would
@@ -462,7 +510,8 @@ Two options:
 Also check, before the CH2 run:
 
 - **Inbound port.** CH2 routes ingress to the port the platform assigns. The demos set
-  `http.port=8083`/`8084` in `config.properties`, and the listener binds `${http.port}`.
+  `http.port` in `config.properties` (8081–8088, a distinct port per app), and the listener binds
+  `${http.port}`.
   System properties outrank the properties file in Mule 4, so the platform value normally
   wins — but confirm the app is actually reachable before treating a bad number as a
   measurement. A CH2 app that fails its ingress health check will not serve `/log` at all.
@@ -505,24 +554,28 @@ a speculative one, and each is something the published protocol deliberately fix
 - [ ] **Same runtime version and Java version** — 4.9.15 / Java 17 on every app.
 - [ ] **Both apps of a vendor pair agree on their intake** — the same `dd.site` and the same
       Datadog API key across the Datadog pair, the same `nr.logHost` and the same New Relic
-      ingest key across the New Relic pair (§3), so intake behaviour and rate limits are shared
-      within each comparison. Same value on both halves, or unset on both halves.
+      ingest key across the New Relic pair, the same Elasticsearch project and the same
+      Dynatrace environment across those pairs (§3), so intake behaviour and rate limits are
+      shared within each comparison. Same value on both halves, or unset on both halves.
 - [ ] **Distinct `app.service` per app** — `datadog-batch-http` vs `datadog-stock-http`, and the
       same shape across the New Relic pair. Leave the defaults alone. `host` is `${sys:domain}` in
       both halves and is *not* a discriminator; every Datadog query in §9 filters on `service`.
+      The Dynatrace pair is the exception: it has no `service` field, and its apps are told
+      apart by `log.source` — automatic on CloudHub 1.0, the `domain` property on CloudHub 2.0.
 - [ ] **`app.platform` set on every app** — `cloudhub-1.0` on each CH1 app, `cloudhub-2.0` on
       each CH2 app. Unset it reads `unspecified` and the two planes become indistinguishable in
-      the backend. The scripted CH1 deploy passes only the vendor credential (and `elastic.url`), so on CloudHub 1.0 it
+      the backend. The scripted CH1 deploy passes only the vendor credential (and `elastic.url` /
+      `dynatrace.url`), so on CloudHub 1.0 it
       **must be set by hand** in Runtime Manager's Properties tab and the app restarted (§3);
       on CloudHub 2.0 it goes in at deploy time (§5).
 - [ ] **Run the A/B pair in adjacent phases of the same window**, batch phase then stock phase,
       so both halves meet the same intake conditions. Do not compare a batch run from Monday
       against a stock run from Tuesday.
 - [ ] **Never two apps against the same vendor intake at once.** The published protocol *is*
-      parallel — one Datadog app and one New Relic app under load together — but the two halves
-      of any one comparison share an intake, so they never overlap. Phases are sequential; within
+      parallel — one app per vendor under load together — but the two halves of any one
+      comparison share an intake, so they never overlap. Phases are sequential; within
       a phase the two apps are pairwise by vendor. See §7.
-- [ ] **Rate limits.** Both vendors throttle their Logs intake per org/key. A batch app at full
+- [ ] **Rate limits.** Vendors throttle their Logs intake per org, key or environment. A batch app at full
       speed ships tens of thousands of events per minute. If you see HTTP 429 in the app log
       (the batch appender logs it and honours `Retry-After`), the run is throttled — note it,
       and treat that pair's absolute req/s as unusable in isolation. Loading one intake with a
@@ -591,7 +644,8 @@ apps at once, so neither half of a comparison waits on the other's intake, and a
 cannot be self-inflicted. Pairing *across* vendors is safe and is the protocol; pairing *within* a
 vendor (batch and stock together, or two apps of the same vendor on the two planes together) is
 what invalidates the session. If you have only one vendor's key, the phases hold one app each and
-run one at a time (§1).
+run one at a time (§1). The published Dynatrace lane is that case: it ran on its own, a day after
+the other three, with the same phases and the same protocol.
 
 If `oha` reports connection failures immediately, suspect the URL before you suspect the app: a
 hostname assembled from the `--region` value instead of read back from `describe` is
@@ -679,7 +733,7 @@ Two cautions on using the law:
   long mean latency is normal; a factor of 2 or 10 is not.
 - **Even a clean run does not land exactly on `-c`.** Rounding in the reported mean is enough to
   move the product by several percent. The published runs completed every request they started and
-  still spread across a band of up to 16% (as `README.md` states), so read agreement within
+  still spread across a band of up to 16%, so read agreement within
   roughly that band as a pass. What the check is looking for is the order-of-magnitude miss, not a
   few percent.
 
@@ -704,6 +758,34 @@ Per run, from oha:
 | Fastest / Slowest | `summary.fastest` / `summary.slowest` |
 | p50 / p75 / p90 / p95 / p99 | `latencyPercentiles` |
 | Aborted due to deadline | error-distribution entry |
+
+Per run, **logs delivered** at the vendor — the logs that reached it ÷ the logs the measured
+requests generated (HTTP 200 responses × 22). The harness writes `LOAD_START_UTC` and
+`LOAD_END_UTC` into each `oha` output file; the counting windows are:
+
+| Vendor | Counted by | Window |
+| --- | --- | --- |
+| Elasticsearch | event time (`@timestamp`) | inside the `oha` window, per `service.name` |
+| Dynatrace | event time (`timestamp`), in Grail with DQL | inside the `oha` window, per `log.source` |
+| Datadog | arrival time | from the test's start to the next test on the same app, per `service` |
+| New Relic | arrival time | the same as Datadog |
+
+Datadog and New Relic count by arrival because the demos omit the vendors' reserved event-time
+attribute on purpose (`includeTimestamp="false"`), so the vendor stamps arrival. For Dynatrace, run
+the count over the API with the **platform** token from §1 (`storage:logs:read` +
+`storage:buckets:read`), not the ingest token, against the environment's platform address:
+
+```bash
+curl -s -X POST \
+  "https://<environment-id>.apps.dynatrace.com/platform/storage/query/v1/query:execute" \
+  -H "Authorization: Bearer $DT_PLATFORM_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"fetch logs, from:\"<LOAD_START_UTC>\", to:\"<LOAD_END_UTC>\" | filter log.source == \"<the app log.source>\" | summarize count()"}'
+```
+
+A query that does not finish within the request returns `"state":"RUNNING"` and a `requestToken`;
+fetch the result with `GET …/query:poll?request-token=<token>`. Count after the backlog has had
+time to drain: event time puts late records back inside the window, but only once they arrive.
 
 Also record, per run, that the run **passed the §7 validation** — the Little's Law product against
 the concurrency of 5, the total duration, and whether the ×10 glitch correction was applied. A
@@ -787,28 +869,34 @@ service:(datadog-batch-http OR datadog-stock-http)
 - Query `service:(datadog-batch-http OR datadog-stock-http)`, **group by `service`**.
 - Same time range for both series — that is the whole point of the figure.
 - The published caption is 84.7K batch vs 5.66K stock; your absolute numbers will differ, so
-  update the caption text in `README.md` to match what you capture.
+  update the caption text in [`vendors/datadog.md`](vendors/datadog.md#ingest-lag-generation-to-arrival)
+  to match what you capture.
 
-Keep the filenames identical so the `README.md` image links keep working.
+Keep the filenames identical so the image links in `vendors/datadog.md` keep working.
 
-**Figures 1 and the chart images** (`cloudhub-throughput-*`, `cloudhub-latency-*`) are
+**Figure 1 and the chart images** — the cross-vendor `cloudhub-*` charts in `docs/img/` and the
+per-vendor `<vendor>-throughput`, `-latency` and `-delivered` charts in `docs/img/vendors/` — are
 generated, not screenshotted:
 
 ```bash
 python3 -m venv .venv-charts
 .venv-charts/bin/pip install -r docs/charts/requirements.txt
-.venv-charts/bin/python docs/charts/generate_benchmark_charts.py
+BENCH_RESULTS=.claude/bench-results/publish-vendors \
+DELIVERY_JSON=.claude/bench-results/publish-vendors/delivery.json \
+SUMMARY_JSON=.claude/bench-results/publish-vendors/summary.json \
+  .venv-charts/bin/python docs/charts/generate_benchmark_charts.py
 ```
 
-The measurements are **hardcoded** in `docs/charts/generate_benchmark_charts.py` in the
-`PLATFORMS` list. Edit those before regenerating.
+Nothing in the script is hardcoded from a prior run: it parses the raw `oha` output under
+`BENCH_RESULTS` and the delivery counts in `DELIVERY_JSON`, and `SUMMARY_JSON` writes every parsed
+number to one file, the single source for the prose in §12. Point the variables at your own run.
 
 ---
 
 ## 10. How many runs
 
-**Recommendation: 5 measured runs per configuration — with twelve configurations (three vendors ×
-two appenders × two planes), 60 runs total — and report the median with the min–max range.** The
+**Recommendation: 5 measured runs per configuration — with sixteen configurations (four vendors ×
+two appenders × two planes), 80 runs total — and report the median with the min–max range.** The
 published figures are one run per configuration, so this remains outstanding.
 
 Reasoning:
@@ -823,13 +911,14 @@ Reasoning:
   worker placement, network path — are not the kind of noise that averages away with n; they
   shift the whole distribution. Ten runs of a throttled window is ten throttled runs.
 
-Cost per run is modest: 60 s of load plus a restart and a settle. Because each phase drives two
-apps at once, five passes is 20 phases rather than 40 serial runs. Budget ~5 minutes per phase
-including the restarts, so ~100 minutes of wall clock, plus deploy time. The real cost is log
-volume — 5 passes × 12 apps × tens of thousands of events, split across the three vendors. Check
-all three plans' ingestion allowances before starting, and consider a short Datadog **exclusion
-filter** or index retention drop on `service:datadog-*-http` (and the New Relic and Elasticsearch
-equivalents) after you have the screenshots.
+Cost per run is the measured window (1 minute for Test 1, 5 minutes for Test 3) plus a restart, a
+warmup and a drain. Because each phase drives one app per vendor at once, a pass is four phases
+(CH1 batch, CH1 stock, CH2 batch, CH2 stock), so five passes are 20 phases per test rather than
+80 serial runs; add the restarts and deploy time. The real cost is log volume — 5 passes × 16 apps
+× tens of thousands of events, split across the four vendors. Check all four plans' ingestion
+allowances before starting, and consider a short Datadog **exclusion filter** or index retention
+drop on `service:datadog-*-http` (and the New Relic, Elasticsearch and Dynatrace equivalents)
+after you have the screenshots.
 
 Also worth doing regardless of n: **alternate the phase order** (batch, stock, stock, batch, …)
 rather than always running the batch phase first, so any drift in intake responsiveness across the
@@ -854,7 +943,7 @@ together — two copies of the same app ship to the same vendor intake, which is
 **This section is retrospective.** It audits the **superseded July** Datadog figures, and it is
 kept because it is the record of *why* the protocol in §7 holds every parameter identical across
 the planes. The re-run has since happened under that protocol and is what
-[`../README.md`](../README.md) and [`index.html`](index.html) now publish; read the numbers below
+[`benchmark-results.md`](benchmark-results.md) and [`index.html`](index.html) now publish; read the numbers below
 as history, not as current results, and re-run the same reasoning against your own figures rather
 than carrying these conclusions forward.
 
@@ -922,7 +1011,7 @@ every single request.
 
 **So the most defensible reading is that the "anomaly" is a ratio artifact of a constant
 additive per-request overhead on the CloudHub 2.0 deployment, not a behavioural difference in
-the appender.** That is also consistent with the README's own guidance to read each req/s
+the appender.** That is also consistent with the published report's own guidance to read each req/s
 against its sibling in the same window rather than across platforms — a caveat the CH1-vs-CH2
 comparison then quietly violates.
 
@@ -1037,36 +1126,41 @@ to explain CH2 on its own.
 
 ## 12. Republish
 
-1. `docs/charts/generate_benchmark_charts.py` — update `PLATFORMS` with the new figures (medians
-   once you have repeated passes; the published set is one run per configuration), regenerate the
-   PNG/SVG pairs.
-2. `docs/index.html` — headline cards, both metric tables, both percentile tables, the
-   inline bar widths (they are percentages of the max latency, recompute them), the meta chips,
-   and the footer.
-3. `README.md` — the two CloudHub tables, the narrative paragraph beneath them, the caveat
-   blockquote, and the Figure 2–4 captions.
+1. `docs/charts/generate_benchmark_charts.py` — re-run it against the new results (§9; medians
+   once you have repeated passes — the published set is one run per configuration). It regenerates
+   the cross-vendor PNG/SVG pairs in `docs/img/`, the per-vendor ones in `docs/img/vendors/`, and
+   `summary.json`, the numbers every item below quotes.
+2. `docs/index.html` — generated: re-run `docs/charts/generate_report_html.py` against the same
+   results, then check the headline cards, the metric and percentile tables, the meta chips and
+   the footer.
+3. `docs/benchmark-results.md` — the per-test tables, the Test 3 headline tables, "How to read
+   this" and the chart captions. Each vendor page's **Benchmark on CloudHub** section (its tables,
+   charts and "what the numbers show"; on the Datadog page, the Figure 2–4 captions). In
+   `README.md`, the **Supported vendors** table (Test 3 batch÷stock and batch delivered) and the
+   **Benchmarks** paragraph.
 4. Replace "single-run" with "median of N runs (min–max: …)" everywhere it appears —
-   `README.md`, `docs/index.html` footer and caveats box, and the header comment in the chart
-   script.
+   `README.md`, `docs/benchmark-results.md`, the vendor pages, the `docs/index.html` footer and
+   caveats box, and the header comment in the chart script.
 5. Record the **commit SHA** of the build under test in `docs/index.html` alongside the
    version, so this problem does not recur.
 6. Record the **CloudHub 1.0 worker region, the CloudHub 2.0 space region and the
-   load-generator location** in `docs/index.html` and in the `README.md` caveat, so a reader
+   load-generator location** in `docs/index.html` and in `docs/benchmark-results.md`, so a reader
    can see that both platforms were measured from the same distance.
 7. Record the **exact `oha` command line, the `count=` value, the URL scheme and the phase pairing
    for each plane**, and state that they were identical across every run. The published
    2026-10-12 run does say that — `count=20` on both planes, CloudHub 1.0 at `-c 10` over `http`,
    CloudHub 2.0 at `-c 5` over `https` — so the payload objection that sank the July cross-plane reading no longer
    applies (the concurrency still differs by plane, by design — §7). **A cross-plane comparability claim still
-   may not appear anywhere** — not in `README.md`, not in `docs/index.html`, not in a chart
-   subtitle or footnote — because the remaining obstacle is not the parameters but the **CPU
+   may not appear anywhere** — not in `README.md`, `docs/benchmark-results.md` or a vendor page,
+   not in `docs/index.html`, not in a chart subtitle or footnote — because the remaining obstacle is not the parameters but the **CPU
    model**: a burstable CloudHub 1.0 worker against a hard-capped CloudHub 2.0 replica. Each
    surface carries that statement, and each table stands as a batch-vs-stock contrast within its
    own vendor and plane; it is only reading one table against another that the record does not
    support. Do not weaken that on the strength of the parameters alone.
 8. Publish each vendor pair as its **own** batch-vs-stock contrast, and do not present the
-   Datadog, New Relic and Elasticsearch figures as a comparison of the vendors: they ship to
-   different intakes over different network paths (New Relic's crosses the Pacific), so the
+   Datadog, New Relic, Elasticsearch and Dynatrace figures as a comparison of the vendors: they
+   ship to different intakes over different network paths (New Relic's crosses the Pacific), and
+   a lane measured on another day (Dynatrace) meets different platform conditions, so the
    pairing makes the appender comparison fair within a vendor and says nothing about which vendor
    is faster.
 
@@ -1117,14 +1211,18 @@ resolution is the instruction.
 
 | Gap | Impact | Suggested resolution |
 | --- | --- | --- |
-| **The `oha` command line was nowhere in the repo.** Only "oha, 10 connections, 60 s" in the July prose. Flags for keep-alive, HTTP version, per-request timeout, rate limit and `-w` were all unrecorded. | A re-run with different defaults is not comparable. | **Closed.** The published protocol is `oha --no-tui -z 5m -w -c <plane-conc> <url>/log?count=20` (CloudHub 1.0 at `-c 10` over `http`, CloudHub 2.0 at `-c 5` over `https`), oha defaults for everything else, text output; the harness also runs Test 1 (`-z 1m`) and Test 4 (`-z 5m -t 30s`). §7 carries it verbatim, and `README.md` and `docs/index.html` both publish it. |
+| **The `oha` command line was nowhere in the repo.** Only "oha, 10 connections, 60 s" in the July prose. Flags for keep-alive, HTTP version, per-request timeout, rate limit and `-w` were all unrecorded. | A re-run with different defaults is not comparable. | **Closed.** The published protocol is `oha --no-tui -z 5m -w -c <plane-conc> <url>/log?count=20` (CloudHub 1.0 at `-c 10` over `http`, CloudHub 2.0 at `-c 5` over `https`), oha defaults for everything else, text output; the harness also runs Test 1 (`-z 1m`) and Test 4 (`-z 5m -t 30s`). §7 carries it verbatim, and `docs/benchmark-results.md` and `docs/index.html` both publish it. |
 | **The warmup was described but not scripted.** "3 requests, 10 s pause" — sequential or concurrent? Same endpoint? Counted? | Minor, but it is the difference between a primed and an unprimed flusher. | **Closed.** The harness that produced the published 2026-10-12 figures sends 5 light warmups (`/log?count=1`) one after another, discarded, then a 30 s drain before the measured window; light, so the warmup does not pre-load the stock flusher's backlog. The manual variant in §7 is 5 `curl --connect-timeout 15 --max-time 60` calls to the same `/log?count=20` endpoint, then a 10 s pause and a 10 s settle after the measured run; if you use it, say so in the report. The July run used 3. |
 | **Neither region is recorded.** Not for CH1, not for CH2, not for the load generator. | Was believed to be the single biggest reproducibility hole and the cause of the CH1-vs-CH2 gap. | **Closed, and the hypothesis it supported is falsified** — both planes were in the same region (§11). Still choose one region up front (§1), set it explicitly (§4), pick a CH2 space in it (§5), check the two match (§6) and record all three locations (§8), as hygiene. |
 | **The July load parameters were not the same on the two planes.** The harness drove CloudHub 1.0 at `-c 10` / `count=30` and CloudHub 2.0 at `-c 5` / `count=15`, and the two planes over different schemes. | Any cross-plane reading measures the parameter difference as much as the platform. | **Permanently open for the July figures, closed for the current ones.** Little's Law puts the July runs at `-c 10` (§11) but cannot resolve `count=`, and no raw output survives to settle it. The current protocol holds `count=20` on both planes, CloudHub 1.0 at `-c 10` over `http` and CloudHub 2.0 at `-c 5` over `https` (§7), recorded per run (§8). |
 | **Which run produced the July figures.** At least two Datadog runs exist and their numbers differ by up to 4× on CloudHub 2.0. | The July table cannot be traced to a procedure, only to prose. | **Unresolvable after the fact, and superseded.** The published run is 2026-10-12, with its parameters recorded (the 2026-08-04 run it replaced is history too); do not cite the July figures as a platform comparison, or as current. |
-| **The vendor region is not recorded** in the report. The app config pins neither: the Datadog demos default to Datadog's primary intake host and read `dd.site` per deployment, the New Relic demos likewise read `nr.logHost`, so the intake used is a property of the run, not of the repo. | Intake latency and rate limits are region-specific. | State all three in the report, and record the `dd.site` and `nr.logHost` values and the Elasticsearch project region — each identical across its own pair (§3, §8). The published run: Datadog `ap2` (Sydney), New Relic US, Elasticsearch Serverless in Sydney. |
+| **The vendor region is not recorded** in the report. The app config pins neither: the Datadog demos default to Datadog's primary intake host and read `dd.site` per deployment, the New Relic demos likewise read `nr.logHost`, so the intake used is a property of the run, not of the repo. | Intake latency and rate limits are region-specific. | State every vendor's region in the report, and record the `dd.site` and `nr.logHost` values, the Elasticsearch project region and the Dynatrace environment region — each identical across its own pair (§3, §8). The published run: Datadog `ap2` (Sydney), New Relic US, Elasticsearch Serverless in Sydney, Dynatrace SaaS on AWS Sydney. |
 | **No run log.** No raw oha output, no app logs, no timestamps are kept in the repo — nor beside the harness, whose results directory does not exist. | Nothing can be re-derived or audited, which is the reason several rows above can only be closed by re-running. | Save the JSON output and the appender heartbeat lines under `docs/benchmark-runs/` (gitignored if large), and keep them for as long as the figures are published. |
 | **The New Relic pair was never benchmarked** before the 2026-08-04 run. | The New Relic figures are a first measurement; there is no prior New Relic figure to reproduce or contradict. | **Closed.** The protocol now drives the New Relic pair in every phase (§7). Label its figures as a first measurement rather than a re-run, and do not read them against the Datadog pair (§12 item 8). |
 | **The exact appender build is unidentified.** Version `0.1.3` covers at least two materially different builds. | Exactly the problem forcing this re-run. | Record the commit SHA — jar digests are per-build and identify nothing across builds (§2), so they are a build record, not an identifier. |
 | **CH2 deployment steps are undocumented.** The report says "0.1 vCore replica" and nothing else — no space, no ingress config, no port handling. | The CH2 half of the benchmark cannot be reproduced from the docs. | Write down the space, its region, the replica size, and the exact JVM args. |
 | **The `FILE` appender is CloudHub 1.0-shaped.** `/opt/mule/mule-CURRENT/logs/mule-${sys:domain}.log`, self-described in the config as the CH1 custom-log-appender convention. | On CH2 that path convention and the `domain` system property may not apply. If the path is unwritable, Log4j2 errors; if `${sys:domain}` does not resolve, Log4j2 writes it as a literal filename. Either way it is a CH2-only cost on the same 0.1 vCore, and it is a difference the report claims does not exist. | Check the CH2 startup log. If it misbehaves, either fix the path for CH2 or drop the `FILE` appender from **both** apps on **both** platforms — symmetrically. |
+
+---
+
+[Benchmark results](benchmark-results.md) · [Docs index](README.md)

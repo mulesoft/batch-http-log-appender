@@ -38,7 +38,8 @@ import java.util.zip.GZIPInputStream;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Two properties the README states as guarantees and that only bite in production:
+ * Two properties the docs state as guarantees (docs/configuration.md and the vendor pages'
+ * "Per-request limits" sections) and that only bite in production:
  *
  * <ul>
  *   <li><b>Vendor ceilings are respected.</b> "The engine also respects each vendor's hard intake

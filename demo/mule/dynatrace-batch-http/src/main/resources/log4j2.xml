@@ -36,7 +36,7 @@
              A/B sibling (dynatrace-stock-http) and from its own other-plane deployment in the
              shared environment. The Dynatrace sink has no service/host attributes, so log.source
              carries both jobs: ${sys:domain} is the CloudHub application name — CloudHub 1.0
-             sets it on every app (e.g. dynatrace-batch-http-poc); on CloudHub 2.0 add a `domain`
+             sets it on every app (the deployed app name); on CloudHub 2.0 add a `domain`
              application property (e.g. dynatrace-batch-http). Unset (locally) it falls back to
              this app's own name. Same delete-don't-clear rule as app.platform below: a
              present-but-empty `domain` resolves to "" and blanks the attribute. -->
