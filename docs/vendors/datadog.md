@@ -66,7 +66,8 @@ A minimal configuration. `site` falls back to the default site host when `DD_SIT
 ```xml
 <Configuration status="WARN" packages="com.mulesoft.support.batchhttp.log4j2">
     <Appenders>
-        <!-- site: the log-intake host of your Datadog site; the sink appends /api/v2/logs -->
+        <!-- site: the log-intake host of your Datadog site;
+             the sink appends /api/v2/logs -->
         <BatchHttp name="datadog" vendor="datadog"
                    site="${env:DD_SITE:-http-intake.logs.datadoghq.com}"
                    apiKey="${env:DD_API_KEY}"
@@ -89,7 +90,7 @@ same Datadog block alongside the other vendors.
 
 ### Mule application
 
-An excerpt of the demo's
+Simplified from the demo's
 [`log4j2.xml`](../../demo/mule/datadog-batch-http/src/main/resources/log4j2.xml). The `packages`
 attribute is required: without it, Log4j2 does not know `<BatchHttp>` inside the Mule app's
 classloader.
@@ -103,30 +104,30 @@ classloader.
         <Property name="dd.site">${sys:dd.site:-${env:DD_SITE:-http-intake.logs.datadoghq.com}}</Property>
     </Properties>
     <Appenders>
-        <!-- RollingFile "FILE" (the CloudHub 1.0 log file) is defined in the full file -->
-        <BatchHttp name="datadog" vendor="datadog" site="${dd.site}"
+        <!-- "FILE" is the CloudHub 1.0 RollingFile, defined in the full file -->
+        <!-- full tuning: see the demo's log4j2.xml -->
+        <BatchHttp name="datadog"
+                   vendor="datadog"
+                   site="${dd.site}"
                    apiKey="${sys:DD_API_KEY:-${sys:datadog.apiKey:-${env:DD_API_KEY:-MISSING_KEY}}}"
-                   service="${app.service}" host="${dd.host}" source="mule"
-                   maxBatchRecords="200" maxBatchBytes="900000" lingerMillis="2000"
-                   queueCapacity="25000" gzip="false"
-                   includeStackTrace="true" includeTimestamp="false"
-                   diagnosticsLevel="INFO" statsIntervalMillis="60000"
-                   spillEnabled="${sys:batch.spillEnabled:-true}"
-                   spillInstanceId="datadog-batch-http"
-                   spillBacklogOrder="DUAL_STREAM" spillReplayThreads="2">
-            <!-- Prepends the platform facet and collapses the flow's pretty-printed JSON message to one line -->
+                   service="${app.service}"
+                   host="${dd.host}"
+                   source="mule"
+                   gzip="false"
+                   includeTimestamp="false"
+                   spillEnabled="${sys:batch.spillEnabled:-true}">
+            <!-- Adds the platform facet; collapses the JSON message to one line -->
             <PatternLayout pattern="{&quot;platform&quot;:&quot;${app.platform}&quot;,%replace{%m}{^\x7B\s*|[\r\n]+\s*}{}"/>
         </BatchHttp>
     </Appenders>
     <Loggers>
-        <!-- Application logs ship to Datadog and the local file, exactly once -->
-        <AsyncLogger name="com.mulesoft.support.batchhttp.muledemo" level="INFO" additivity="false">
+        <AsyncLogger name="com.mulesoft.support.batchhttp.muledemo"
+                     level="INFO"
+                     additivity="false">
             <AppenderRef ref="datadog"/>
             <AppenderRef ref="FILE"/>
         </AsyncLogger>
-        <AsyncLogger name="org.mule" level="INFO"/>
-        <AsyncLogger name="com.mulesoft" level="INFO"/>
-        <!-- Root carries the FILE appender only: framework lines are not shipped to Datadog -->
+        <!-- Root: FILE only; framework lines are not shipped to Datadog -->
         <AsyncRoot level="INFO">
             <AppenderRef ref="FILE"/>
         </AsyncRoot>

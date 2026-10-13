@@ -91,8 +91,9 @@ lookups and never write them into the file.
 ```xml
 <Configuration status="WARN" packages="com.mulesoft.support.batchhttp.log4j2">
     <Appenders>
-        <!-- url: the Elasticsearch endpoint (scheme, host, optional port); the sink appends
-             /<index>/_bulk. apiKey: the "encoded" API key Kibana shows once at creation. -->
+        <!-- url: the Elasticsearch endpoint (scheme, host, optional port);
+             the sink appends /<index>/_bulk.
+             apiKey: the "encoded" API key Kibana shows once at creation. -->
         <BatchHttp name="elastic" vendor="elasticsearch"
                    url="${env:ELASTIC_URL}"
                    apiKey="${env:ELASTIC_API_KEY}"
@@ -120,11 +121,11 @@ contains the same block next to the other vendors.
 
 ### Mule application
 
-This is the appender wiring from the sample app's
-[`log4j2.xml`](../../demo/mule/elastic-batch-http/src/main/resources/log4j2.xml), shortened:
-the framework noise-reduction loggers, most comments and the sample's tuning attributes are
-left out. `packages="com.mulesoft.support.batchhttp.log4j2"` is **required in every Mule app**,
-because the jar sits on the application classloader.
+Simplified from the sample app's
+[`log4j2.xml`](../../demo/mule/elastic-batch-http/src/main/resources/log4j2.xml): the framework
+noise-reduction loggers, most comments and the sample's tuning attributes are left out.
+`packages="com.mulesoft.support.batchhttp.log4j2"` is **required in every Mule app**, because the
+jar sits on the application classloader.
 
 ```xml
 <Configuration status="INFO" packages="com.mulesoft.support.batchhttp.log4j2">
@@ -137,18 +138,24 @@ because the jar sits on the application classloader.
     </Properties>
     <Appenders>
         <!-- RollingFile "FILE" (the CloudHub 1.0 log file) is shown below -->
-        <BatchHttp name="elastic" vendor="elasticsearch"
+        <!-- full tuning: see the demo's log4j2.xml -->
+        <BatchHttp name="elastic"
+                   vendor="elasticsearch"
                    url="${es.url}"
                    apiKey="${sys:ELASTIC_API_KEY:-${sys:elastic.apiKey:-${env:ELASTIC_API_KEY:-MISSING_KEY}}}"
                    index="${es.dataStream}"
                    service="${app.service}"
-                   host="${es.host}">
-            <!-- Prepend the platform facet and collapse the flow's pretty JSON to one line. -->
+                   host="${es.host}"
+                   gzip="false"
+                   spillEnabled="${sys:batch.spillEnabled:-true}">
+            <!-- Prepend the platform facet; collapse the flow's JSON to one line. -->
             <PatternLayout pattern="{&quot;platform&quot;:&quot;${app.platform}&quot;,%replace{%m}{^\x7B\s*|[\r\n]+\s*}{}"/>
         </BatchHttp>
     </Appenders>
     <Loggers>
-        <AsyncLogger name="com.mulesoft.support.batchhttp.muledemo" level="INFO" additivity="false">
+        <AsyncLogger name="com.mulesoft.support.batchhttp.muledemo"
+                     level="INFO"
+                     additivity="false">
             <AppenderRef ref="elastic"/>
             <AppenderRef ref="FILE"/>
         </AsyncLogger>
@@ -177,52 +184,6 @@ because the jar sits on the application classloader.
 
 </details>
 
-<details>
-<summary>The sample's full &lt;BatchHttp&gt; element, with its tuning attributes</summary>
-
-```xml
-<BatchHttp name="elastic"
-           vendor="elasticsearch"
-           url="${es.url}"
-           apiKey="${sys:ELASTIC_API_KEY:-${sys:elastic.apiKey:-${env:ELASTIC_API_KEY:-MISSING_KEY}}}"
-           index="${es.dataStream}"
-           service="${app.service}"
-           host="${es.host}"
-           maxBatchRecords="200"
-           maxBatchBytes="900000"
-           lingerMillis="2000"
-           queueCapacity="25000"
-           overflowPolicy="DROP_NEWEST"
-           gzip="false"
-           maxRetries="3"
-           requestTimeoutMillis="10000"
-           shutdownDrainTimeoutMillis="5000"
-           flusherThreads="1"
-           includeStackTrace="true"
-           diagnosticsLevel="INFO"
-           statsIntervalMillis="60000"
-           spillEnabled="${sys:batch.spillEnabled:-true}"
-           spillInstanceId="elastic-batch-http"
-           spillReplayIntervalMillis="10000"
-           maxSpillFileBytes="16777216"
-           maxTotalSpillBytes="536870912"
-           minFreeDiskBytes="268435456"
-           spillOnOverflow="true"
-           spillFormat="BINARY"
-           spillRecoveryMode="ADOPT"
-           spillStartupReconcile="true"
-           spillBacklogOrder="DUAL_STREAM"
-           spillReplayThreads="2"
-           spillReplayMaxBytesPerSec="0">
-    <!-- gzip="false" is a deliberate A/B divergence: the stock sibling cannot compress.
-         Production should leave gzip on (omit the attribute). -->
-    <!-- Prepend the platform facet and collapse the flow's pretty JSON to one line. -->
-    <PatternLayout pattern="{&quot;platform&quot;:&quot;${app.platform}&quot;,%replace{%m}{^\x7B\s*|[\r\n]+\s*}{}"/>
-</BatchHttp>
-```
-
-</details>
-
 Things to know about this sample:
 
 - **Injection.** Log4j2 parses `log4j2.xml`, so Mule `${...}` placeholders and `secure::`
@@ -241,8 +202,10 @@ Things to know about this sample:
 - **One divergence for the A/B test:** `gzip="false"`, because the stock sibling cannot
   compress; the [sample README](../../demo/mule/elastic-batch-http/README.md) explains it.
 - **Sample tuning.** The other non-default values (spill sizes, `spillBacklogOrder`,
-  `spillReplayThreads`, `maxBatchBytes`, `lingerMillis`, `queueCapacity`) are sample tuning;
-  each is described in the [configuration reference](../configuration.md).
+  `spillReplayThreads`, `maxBatchBytes`, `lingerMillis`, `queueCapacity`) are sample tuning, set
+  in the demo's
+  [`log4j2.xml`](../../demo/mule/elastic-batch-http/src/main/resources/log4j2.xml); each is
+  described in the [configuration reference](../configuration.md).
 - **Discriminator.** The two apps run an identical flow and write identical ECS documents into
   the same data stream. `service.name` is the intended discriminator (`host.name` also differs,
   because it is each app's own name or pod).
@@ -469,12 +432,18 @@ service.name : "elastic-batch-http"
 This is how the benchmark counted delivery. The shipping key from
 [Set up](#set-up-elasticsearch) is deliberately write-only, so the count needs a separate key or
 user with `read` (and `view_index_metadata`) on `logs-mule*`, for example a second, read-only
-API key. Send the query to the same endpoint with it:
+API key. Send the query to the same endpoint with it (`jq` builds the JSON body):
 
 ```bash
-curl -s -X POST "$ELASTIC_URL/_query?format=json" \
-  -H "Authorization: ApiKey $ELASTIC_READ_KEY" -H "Content-Type: application/json" \
-  -d '{"query":"FROM logs-mule-default | WHERE service.name == \"elastic-batch-http\" AND @timestamp >= \"2026-10-12T00:00:00Z\" | STATS n = COUNT(*)"}'
+QUERY='FROM logs-mule-default
+| WHERE service.name == "elastic-batch-http"
+    AND @timestamp >= "2026-10-12T00:00:00Z"
+| STATS n = COUNT(*)'
+jq -n --arg query "$QUERY" '{$query}' |
+  curl -s -X POST "$ELASTIC_URL/_query?format=json" \
+    -H "Authorization: ApiKey $ELASTIC_READ_KEY" \
+    -H "Content-Type: application/json" \
+    --data-binary @-
 ```
 
 ### Quick connectivity check without the appender
@@ -483,9 +452,11 @@ Post a single document. A `200` response with `"errors":false` proves that the e
 key and its privileges all work:
 
 ```bash
-printf '{"create":{}}\n{"@timestamp":"2026-10-13T00:00:00.000Z","message":"connectivity check"}\n' |
+printf '%s\n' '{"create":{}}' \
+  '{"@timestamp":"2026-10-13T00:00:00.000Z","message":"connectivity check"}' |
   curl -s -X POST "$ELASTIC_URL/logs-mule-default/_bulk" \
-    -H "Authorization: ApiKey $ELASTIC_API_KEY" -H "Content-Type: application/x-ndjson" \
+    -H "Authorization: ApiKey $ELASTIC_API_KEY" \
+    -H "Content-Type: application/x-ndjson" \
     --data-binary @-
 ```
 

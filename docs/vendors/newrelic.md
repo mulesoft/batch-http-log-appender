@@ -101,40 +101,38 @@ contains a minimal New Relic appender (no `service`, `hostname` or Layout).
 
 ### Mule application
 
-This is the core of the demo app's configuration. Only the application's own logger ships to New
+Simplified from the demo app's configuration. Only the application's own logger ships to New
 Relic; framework logs stay in the CloudHub log file. The full file is
 [`demo/mule/newrelic-batch-http/src/main/resources/log4j2.xml`](../../demo/mule/newrelic-batch-http/src/main/resources/log4j2.xml).
 
 ```xml
 <Configuration status="INFO" packages="com.mulesoft.support.batchhttp.log4j2">
     <Properties>
-        <!-- service facet: defaults to the app name. Delete an override; don't clear it. -->
-        <Property name="app.service">${sys:app.service:-newrelic-batch-http}</Property>
         <!-- platform facet: -Dapp.platform=cloudhub-1.0 or APP_PLATFORM=cloudhub-2.0 -->
         <Property name="app.platform">${sys:app.platform:-${env:APP_PLATFORM:-unspecified}}</Property>
-        <!-- reserved hostname: CloudHub 1.0 app name, else the container or machine hostname -->
-        <Property name="nr.hostname">${sys:domain:-${env:HOSTNAME:-${hostName}}}</Property>
-        <!-- Log API host for the account's region; the stock sibling uses the identical chain -->
-        <Property name="nr.logHost">${sys:nr.logHost:-${env:NEW_RELIC_LOG_HOST:-log-api.newrelic.com}}</Property>
     </Properties>
     <Appenders>
-        <!-- The RollingFile "FILE" appender (CloudHub 1.0 log file) is in the full file. -->
-        <!-- gzip="false" and includeTimestamp="false" are A/B choices, not production advice -->
+        <!-- RollingFile "FILE" (the CloudHub 1.0 log file) is in the full file. -->
+        <!-- host: the region's Log API host; the stock sibling uses the same chain.
+             service: defaults to the app name. Delete an override; don't clear it.
+             hostname (reserved): CloudHub 1.0 app name, else the container/machine
+             hostname. gzip="false", includeTimestamp="false": A/B choices only. -->
+        <!-- full tuning: see the demo's log4j2.xml -->
         <BatchHttp name="newrelic" vendor="newrelic"
-                   host="${nr.logHost}"
-                   apiKey="${sys:NEW_RELIC_API_KEY:-${sys:newrelic.apiKey:-${env:NEW_RELIC_API_KEY:-MISSING_KEY}}}"
-                   service="${app.service}"
-                   hostname="${nr.hostname}"
+                   host="${sys:nr.logHost:-${env:NEW_RELIC_LOG_HOST:-log-api.newrelic.com}}"
+                   apiKey="${sys:newrelic.apiKey:-${env:NEW_RELIC_API_KEY:-MISSING_KEY}}"
+                   service="${sys:app.service:-newrelic-batch-http}"
+                   hostname="${sys:domain:-${env:HOSTNAME:-${hostName}}}"
                    gzip="false"
                    includeTimestamp="false"
-                   spillEnabled="${sys:batch.spillEnabled:-true}"
-                   spillInstanceId="newrelic-batch-http"
-                   statsIntervalMillis="60000">
+                   spillEnabled="${sys:batch.spillEnabled:-true}">
             <PatternLayout pattern="{&quot;logtype&quot;:&quot;mule&quot;,&quot;platform&quot;:&quot;${app.platform}&quot;,%replace{%m}{^\x7B\s*|[\r\n]+\s*}{}"/>
         </BatchHttp>
     </Appenders>
     <Loggers>
-        <AsyncLogger name="com.mulesoft.support.batchhttp.muledemo" level="INFO" additivity="false">
+        <AsyncLogger name="com.mulesoft.support.batchhttp.muledemo"
+                     level="INFO"
+                     additivity="false">
             <AppenderRef ref="newrelic"/>
             <AppenderRef ref="FILE"/>
         </AsyncLogger>
@@ -171,16 +169,20 @@ set the same value on the stock sibling.
 <summary>The demo's other attributes and its file appender</summary>
 
 The sample above omits the demo's tuning attributes, its explanatory comments and the CloudHub
-framework noise-reduction loggers. The demo also sets:
+framework noise-reduction loggers. To keep lines short it also writes the `host`, `service` and
+`hostname` lookups inline, where the demo routes them through the `nr.logHost`, `app.service` and
+`nr.hostname` properties (same chains, same result). The sample's key lookup drops the demo's first
+link: the demo reads `${sys:NEW_RELIC_API_KEY:-${sys:newrelic.apiKey:-${env:NEW_RELIC_API_KEY:-MISSING_KEY}}}`,
+so a `NEW_RELIC_API_KEY` system property also works there. The demo also sets:
 
 | Area | Demo values |
 |---|---|
 | Batching | `maxBatchRecords="200"`, `maxBatchBytes="900000"`, `lingerMillis="2000"` |
 | Queue and flushing | `queueCapacity="25000"`, `overflowPolicy="DROP_NEWEST"`, `flusherThreads="1"` |
 | Requests and shutdown | `maxRetries="3"`, `requestTimeoutMillis="10000"`, `shutdownDrainTimeoutMillis="5000"` |
-| Records and diagnostics | `includeStackTrace="true"`, `diagnosticsLevel="INFO"` |
+| Records and diagnostics | `includeStackTrace="true"`, `diagnosticsLevel="INFO"`, `statsIntervalMillis="60000"` |
 | Spill sizing | `spillReplayIntervalMillis="10000"`, `maxSpillFileBytes="16777216"`, `maxTotalSpillBytes="536870912"`, `minFreeDiskBytes="268435456"` |
-| Spill behaviour | `spillOnOverflow="true"`, `spillFormat="BINARY"`, `spillRecoveryMode="ADOPT"`, `spillStartupReconcile="true"` |
+| Spill behaviour | `spillInstanceId="newrelic-batch-http"`, `spillOnOverflow="true"`, `spillFormat="BINARY"`, `spillRecoveryMode="ADOPT"`, `spillStartupReconcile="true"` |
 | Spill replay | `spillBacklogOrder="DUAL_STREAM"`, `spillReplayThreads="2"`, `spillReplayMaxBytesPerSec="0"` |
 
 The `FILE` appender is the CloudHub 1.0 custom-log-appender file, kept so platform logging still
@@ -443,7 +445,8 @@ Relic's documentation for the exact categories.
 Set [`statsIntervalMillis`](../configuration.md#opt-statsintervalmillis) to get a heartbeat line:
 
 ```text
-batch-http[NewRelic] stats accepted=... sentRecords=... dropped=... queueDepth=... spill{...}
+batch-http[NewRelic] stats accepted=... sentRecords=... dropped=...
+    queueDepth=... spill{...}
 ```
 
 - `sentRecords` keeps rising while `dropped` stays at 0: New Relic is answering `2xx`.

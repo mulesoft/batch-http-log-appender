@@ -125,7 +125,8 @@ In a Mule app the appender typically looks like this:
 ```xml
 <Configuration status="INFO" packages="com.mulesoft.support.batchhttp.log4j2">
     <Appenders>
-        <!-- Keep the app's other appenders (for example the CloudHub 1.0 RollingFile "FILE") -->
+        <!-- Keep the app's other appenders
+             (for example the CloudHub 1.0 RollingFile "FILE") -->
         <BatchHttp name="splunk" vendor="splunk"
                    url="${sys:splunk.hecUrl:-${env:SPLUNK_HEC_URL}}"
                    token="${sys:splunk.hecToken:-${env:SPLUNK_HEC_TOKEN:-MISSING_TOKEN}}"

@@ -69,7 +69,8 @@ Put `com.mulesoft.support.batchhttp:batch-http-log4j2` on the classpath (see
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- Minimal log4j2.xml for a plain Java app shipping to Dynatrace.
      Set DT_ENVIRONMENT_URL (the environment URL; the sink appends /api/v2/logs/ingest)
-     and DT_API_TOKEN (an access token with only the logs.ingest scope) in the environment. -->
+     and DT_API_TOKEN (an access token with only the logs.ingest scope) in the
+     environment. -->
 <Configuration status="WARN" packages="com.mulesoft.support.batchhttp.log4j2">
     <Appenders>
         <BatchHttp name="dynatrace"
@@ -114,49 +115,42 @@ CloudHub application properties arrive as system properties. Under the standalon
 `-D` doesn't reach the Mule JVM. [Using it from a Mule app](../mule.md) covers packaging and secret
 injection in general.
 
-An excerpt of the sample app's
+Simplified from the sample app's
 [`log4j2.xml`](../../demo/mule/dynatrace-batch-http/src/main/resources/log4j2.xml). The `packages`
 attribute is required: without it, Log4j2 does not know `<BatchHttp>` inside the Mule app's
 classloader. The loggers also reference `FILE`, the CloudHub 1.0 custom log appender file shown in
 the collapsed block below.
 
 ```xml
-<!-- Excerpt of demo/mule/dynatrace-batch-http/src/main/resources/log4j2.xml.
+<!-- Simplified from demo/mule/dynatrace-batch-http/src/main/resources/log4j2.xml.
      On CloudHub set dynatrace.url as an application property
      and dynatrace.token as a SECURE one. -->
 <Configuration status="INFO" packages="com.mulesoft.support.batchhttp.log4j2">
     <Properties>
         <Property name="dt.source">${sys:domain:-dynatrace-batch-http}</Property>
-        <Property name="app.platform">${sys:app.platform:-${env:APP_PLATFORM:-unspecified}}</Property>
-        <Property name="dt.url">${sys:DT_ENVIRONMENT_URL:-${sys:dynatrace.url:-${env:DT_ENVIRONMENT_URL:-https://set-dynatrace-url.invalid}}}</Property>
+        <Property name="app.platform">${sys:app.platform:-unspecified}</Property>
     </Properties>
     <Appenders>
         <!-- RollingFile "FILE" (the CloudHub 1.0 log file) is shown below -->
-        <BatchHttp name="dynatrace" vendor="dynatrace" url="${dt.url}"
-                   token="${sys:DT_API_TOKEN:-${sys:dynatrace.token:-${env:DT_API_TOKEN:-MISSING_TOKEN}}}"
-                   source="${dt.source}" includeStackTrace="true" gzip="false"
-                   maxBatchRecords="200" maxBatchBytes="900000" lingerMillis="2000"
-                   queueCapacity="25000" overflowPolicy="DROP_NEWEST" flusherThreads="1"
-                   maxRetries="3" requestTimeoutMillis="10000" shutdownDrainTimeoutMillis="5000"
-                   diagnosticsLevel="INFO" statsIntervalMillis="60000"
-                   spillEnabled="${sys:batch.spillEnabled:-true}" spillInstanceId="dynatrace-batch-http"
-                   spillReplayIntervalMillis="10000" spillReplayThreads="2" spillReplayMaxBytesPerSec="0"
-                   maxSpillFileBytes="16777216" maxTotalSpillBytes="536870912" minFreeDiskBytes="268435456"
-                   spillOnOverflow="true" spillFormat="BINARY" spillRecoveryMode="ADOPT"
-                   spillStartupReconcile="true" spillBacklogOrder="DUAL_STREAM">
-            <!-- content = the flow's pretty JSON collapsed to one line,
-                 with the platform facet prepended. -->
+        <BatchHttp name="dynatrace"
+                   vendor="dynatrace"
+                   url="${sys:dynatrace.url:-${env:DT_ENVIRONMENT_URL:-https://set-dynatrace-url.invalid}}"
+                   token="${sys:dynatrace.token:-${env:DT_API_TOKEN:-MISSING_TOKEN}}"
+                   source="${dt.source}"
+                   gzip="false"
+                   spillEnabled="${sys:batch.spillEnabled:-true}">
+            <!-- full tuning: see the demo's log4j2.xml -->
+            <!-- content = the flow's JSON on one line, platform facet prepended -->
             <PatternLayout pattern="{&quot;platform&quot;:&quot;${app.platform}&quot;,%replace{%m}{^\x7B\s*|[\r\n]+\s*}{}"/>
         </BatchHttp>
     </Appenders>
     <Loggers>
-        <!-- Application logs ship to Dynatrace and the local file. -->
-        <AsyncLogger name="com.mulesoft.support.batchhttp.muledemo" level="INFO" additivity="false">
+        <AsyncLogger name="com.mulesoft.support.batchhttp.muledemo"
+                     level="INFO"
+                     additivity="false">
             <AppenderRef ref="dynatrace"/>
             <AppenderRef ref="FILE"/>
         </AsyncLogger>
-        <AsyncLogger name="org.mule" level="INFO"/>
-        <AsyncLogger name="com.mulesoft" level="INFO"/>
         <!-- Root carries the FILE appender only: framework lines are not shipped. -->
         <AsyncRoot level="INFO">
             <AppenderRef ref="FILE"/>
@@ -436,7 +430,9 @@ curl -s -X POST \
   "https://<environment-id>.apps.dynatrace.com/platform/storage/query/v1/query:execute" \
   -H "Authorization: Bearer $DT_PLATFORM_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"query":"fetch logs, from:now()-1h | filter log.source == \"dynatrace-batch-http\" | summarize count()"}'
+  -d "$(jq -n --arg q 'fetch logs, from:now()-1h
+    | filter log.source == "dynatrace-batch-http"
+    | summarize count()' '{query: $q}')"
 ```
 
 If the query doesn't finish within the request, the response has `"state":"RUNNING"` and a

@@ -181,8 +181,8 @@ Run from the repo root. Record `git rev-parse HEAD` — that commit, not the ver
 (`0.2.0` for the published run), is what identifies the build under test.
 
 ```bash
-git rev-parse HEAD                       # record this in the report
-mvn -B clean install                     # installs batch-http-core + batch-http-log4j2 into ~/.m2
+git rev-parse HEAD     # record this in the report
+mvn -B clean install   # installs batch-http-core + batch-http-log4j2 into ~/.m2
 ```
 
 The build enforces license headers at `validate` and the tests bind localhost sockets, so run
@@ -198,8 +198,10 @@ is visible rather than mistaken for a clean build.
 They are **not** modules of the root reactor, so each is a separate invocation:
 
 ```bash
-for d in datadog-batch-http datadog-stock-http newrelic-batch-http newrelic-stock-http \
-         elastic-batch-http elastic-stock-http dynatrace-batch-http dynatrace-stock-http; do
+for d in datadog-batch-http datadog-stock-http \
+         newrelic-batch-http newrelic-stock-http \
+         elastic-batch-http elastic-stock-http \
+         dynatrace-batch-http dynatrace-stock-http; do
   (cd "demo/mule/$d" && mvn -B clean package)
 done
 ```
@@ -227,8 +229,10 @@ deploy, so they are also what the checks below verify:
 
 ```bash
 mkdir -p demo/mule/deployable
-for app in datadog-batch-http datadog-stock-http newrelic-batch-http newrelic-stock-http \
-           elastic-batch-http elastic-stock-http dynatrace-batch-http dynatrace-stock-http; do
+for app in datadog-batch-http datadog-stock-http \
+           newrelic-batch-http newrelic-stock-http \
+           elastic-batch-http elastic-stock-http \
+           dynatrace-batch-http dynatrace-stock-http; do
   cp "$(ls demo/mule/$app/target/*-mule-application.jar)" "demo/mule/deployable/$app.jar"
 done
 ```
@@ -262,12 +266,15 @@ be byte-identical. That proves the deployable carries this build's appender rath
 artifact resolved from somewhere else — the failure mode that spoiled the original benchmark.
 
 ```bash
-VER=0.2.0                    # the root POM's <version>; the batch demos pin the same batchhttp.version
-WORK="$(mktemp -d)"          # outside the repo, so nothing is extracted into the working tree
+# The root POM's <version>; the batch demos pin the same batchhttp.version.
+VER=0.2.0
+# Outside the repo, so nothing is extracted into the working tree.
+WORK="$(mktemp -d)"
 
 for m in batch-http-core batch-http-log4j2; do
   built="$(md5 -q "$m/target/$m-$VER.jar")"
-  for app in datadog-batch-http newrelic-batch-http elastic-batch-http dynatrace-batch-http; do
+  for app in datadog-batch-http newrelic-batch-http \
+             elastic-batch-http dynatrace-batch-http; do
     entry="repository/com/mulesoft/support/batchhttp/$m/$VER/$m-$VER.jar"
     unzip -o -q "demo/mule/deployable/$app.jar" "$entry" -d "$WORK/$app"
     bundled="$(md5 -q "$WORK/$app/$entry")"
@@ -288,7 +295,8 @@ The four stock apps are the control: they must run on the Mule container's stock
 bundle **no** appender of their own.
 
 ```bash
-for app in datadog-stock-http newrelic-stock-http elastic-stock-http dynatrace-stock-http; do
+for app in datadog-stock-http newrelic-stock-http \
+           elastic-stock-http dynatrace-stock-http; do
   jar="demo/mule/deployable/$app.jar"
   printf '%-22s batch-http jars: %s   log4j jars: %s\n' "$app" \
     "$(unzip -l "$jar" | grep -c 'batch-http.*\.jar$')" \
@@ -446,7 +454,8 @@ once with `anypoint-cli-v4 conf` or the `ANYPOINT_*` environment variables.
 assertion, the hostname capture below, and polling until each app reports `STARTED`:
 
 ```bash
-scripts/deploy-ch1.sh [--dry-run] [--datadog | --newrelic | --elastic | --dynatrace | --all] [APP ...]
+scripts/deploy-ch1.sh [--dry-run] \
+  [--datadog | --newrelic | --elastic | --dynatrace | --all] [APP ...]
 ```
 
 It defaults to the Datadog pair, and reads these from the environment:
@@ -772,7 +781,8 @@ below is the manual variant; record which one you used.
 # One app's side of a phase. The paired app of the other vendor runs this same block
 # concurrently, in step — see "Run it paired-parallel" below.
 URL="${BATCH_URL}"          # captured from describe -o json in §4
-CONC=10                     # CloudHub 1.0: -c 10 ; CloudHub 2.0: -c 5 — see "Concurrency by plane" below
+# CloudHub 1.0: -c 10 ; CloudHub 2.0: -c 5 — see "Concurrency by plane" below
+CONC=10
 COUNT=20                    # both planes, so 22 log events per request
 
 # 1. Warmup — 5 requests, one after another. Primes JIT, the connection pool,
@@ -956,7 +966,9 @@ curl -s -X POST \
   "https://<environment-id>.apps.dynatrace.com/platform/storage/query/v1/query:execute" \
   -H "Authorization: Bearer $DT_PLATFORM_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"query":"fetch logs, from:\"<LOAD_START_UTC>\", to:\"<LOAD_END_UTC>\" | filter log.source == \"<the app log.source>\" | summarize count()"}'
+  -d "$(jq -n --arg q 'fetch logs, from:"<LOAD_START_UTC>", to:"<LOAD_END_UTC>"
+    | filter log.source == "<the app log.source>"
+    | summarize count()' '{query: $q}')"
 ```
 
 A query that does not finish within the request returns `"state":"RUNNING"` and a `requestToken`;

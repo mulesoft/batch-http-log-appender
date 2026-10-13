@@ -266,8 +266,10 @@ the sink's own record and byte ceilings, and arbitrary request headers.
 ```java
 LogSink sink = GenericNdjsonSink.builder()
         .url("https://logs.internal.example.com/bulk")
-        .framing(GenericNdjsonSink.Framing.JSON_ARRAY)   // one JSON array instead of NDJSON
-        .header("X-Scope-OrgID", "team-42")              // custom header the XML appender can't set
+        // one JSON array instead of NDJSON
+        .framing(GenericNdjsonSink.Framing.JSON_ARRAY)
+        // custom header the XML appender can't set
+        .header("X-Scope-OrgID", "team-42")
         .maxRecords(1000)
         .build();
 ```
@@ -283,10 +285,26 @@ is a working example of embedding the engine around this sink.
 Each log event becomes one flat JSON object: the fixed fields `timestamp`, `level`, `logger`,
 `thread` and `message`, an optional `exception`, then one top-level string field per MDC entry. A
 request body is NDJSON: one object per line, each line ending in `\n`, including the last.
+The two objects below are pretty-printed for reading; on the wire each one is a single line.
 
-```text
-{"timestamp":1700000000000,"level":"INFO","logger":"demo","thread":"main","message":"order processed id=1","env":"prod"}
-{"timestamp":1700000000004,"level":"ERROR","logger":"demo","thread":"main","message":"payment failed id=2","exception":"java.lang.IllegalStateException: declined\n\tat demo.Pay.run(Pay.java:42)\n","env":"prod"}
+```json
+{
+  "timestamp": 1700000000000,
+  "level": "INFO",
+  "logger": "demo",
+  "thread": "main",
+  "message": "order processed id=1",
+  "env": "prod"
+}
+{
+  "timestamp": 1700000000004,
+  "level": "ERROR",
+  "logger": "demo",
+  "thread": "main",
+  "message": "payment failed id=2",
+  "exception": "java.lang.IllegalStateException\n\tat demo.Pay.run(Pay.java:42)\n",
+  "env": "prod"
+}
 ```
 
 ### Field mapping
@@ -377,10 +395,11 @@ There is no vendor UI, so check from both ends.
 With [`diagnosticsLevel`](../configuration.md#opt-diagnosticslevel) `INFO`,
 [`statsIntervalMillis`](../configuration.md#opt-statsintervalmillis) set, and
 `<Configuration status>` at `INFO` or finer, the Log4j2 StatusLogger prints a line like this for
-every interval:
+every interval (wrapped here for width; in the log it is one line):
 
 ```text
-batch-http[Generic(logs.internal.example.com)] stats accepted=1200 sentRecords=1200 sentBatches=6 dropped=0 failedBatches=0 queueDepth=0 spill{...}
+batch-http[Generic(logs.internal.example.com)] stats accepted=1200 sentRecords=1200
+    sentBatches=6 dropped=0 failedBatches=0 queueDepth=0 spill{...}
 ```
 
 A rising `sentRecords` with `dropped=0` means the collector is answering `2xx`. At the default

@@ -23,12 +23,16 @@ flowchart TD
 
     subgraph core["batch-http-core — zero runtime deps"]
         Shipper --> Queue["Bounded in-memory queue<br/>non-blocking offer"]
-        Queue --> Flush{"Flush trigger?<br/>max records &bull; max bytes &bull; linger time"}
+        Flush{"Flush trigger?<br/>max records &bull; max bytes &bull; linger time"}
+        Queue --> Flush
         Flush -->|not yet| Queue
-        Flush -->|batch ready| Sink["LogSink<br/>Datadog / Splunk / New Relic / Dynatrace / Elasticsearch / Generic"]
-        Sink --> Transport["HttpTransport<br/>JDK HttpClient &bull; gzip &bull; retry + backoff"]
+        Sink["LogSink<br/>Datadog / Splunk / New Relic /<br/>Dynatrace / Elasticsearch / Generic"]
+        Flush -->|batch ready| Sink
+        Transport["HttpTransport<br/>JDK HttpClient &bull; gzip &bull; retry + backoff"]
+        Sink --> Transport
 
-        Queue -.->|queue full &amp; spillOnOverflow| Spill[("SpillStore<br/>disk segment files")]
+        Spill[("SpillStore<br/>disk segment files")]
+        Queue -.->|queue full &amp; spillOnOverflow| Spill
         Transport -.->|retries exhausted| Spill
         Spill -.->|background drain| Replayer["SpillReplayer"]
         Replayer -.->|resend| Transport
