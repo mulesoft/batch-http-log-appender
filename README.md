@@ -16,15 +16,19 @@ On this page: [Why](#why) · [Supported vendors](#supported-vendors) · [Quick s
   enqueued (non-blocking) and shipped in compressed batches by background threads.
 
 <a id="benchmark-local-mock-intake-5-ms-simulated-latencyrequest-5000-events"></a>
-**Local benchmark:** 5,000 log events sent to a mock intake that adds 5 ms of latency per request.
+**Local test:** 5,000 log events sent to a mock intake on the same machine. The intake takes 5 ms
+to answer each request.
 
-| | Stock `HttpAppender` | Batch appender | Difference |
-|---|---:|---:|---|
-| Wall clock | 32,634 ms | **82 ms** | about **400× faster** |
-| HTTP requests | 5,000 | **10** | **500× fewer** |
+| | Stock `HttpAppender` style | Batch appender |
+|---|---|---|
+| How it sends | One request per event, waits for each answer | 500 events per request, from a background thread |
+| HTTP requests | 5,000 | 10 (**500× fewer**) |
+| Time to deliver all 5,000 events | 32.6 s | 0.08 s (**about 400× faster**) |
+| Your thread while logging | Blocked on every request | Continues immediately |
 
-[Run it yourself](docs/building.md#run-the-benchmark--example) · Results on real vendor intakes
-from CloudHub: [Benchmarks](#benchmarks)
+*This is the best case by design: the mock answers in exactly 5 ms whatever the batch size. On
+real networks the gain depends on how far away the intake is; see the
+[CloudHub results](#benchmarks).* [Run it yourself](docs/building.md#run-the-benchmark--example).
 
 ## Supported vendors
 
