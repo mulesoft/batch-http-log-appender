@@ -2,7 +2,7 @@
 
 A **batching HTTP log shipper** for Java: a fast, drop-in replacement for Log4j2's stock
 `HttpAppender`, which sends one synchronous HTTP request per log event. Current release:
-**0.2.0** ([CHANGELOG](CHANGELOG.md)).
+**0.2.1** ([CHANGELOG](CHANGELOG.md)).
 
 On this page: [Why](#why) · [Supported vendors](#supported-vendors) · [Quick start](#quick-start) ·
 [Benchmarks](#benchmarks) · [Documentation](#documentation) · [Project](#project)
@@ -62,7 +62,7 @@ CH1 and CH2 run at different concurrency, so compare within a column, never CH1 
    <dependency>
        <groupId>com.mulesoft.support.batchhttp</groupId>
        <artifactId>batch-http-log4j2</artifactId>
-       <version>0.2.0</version>
+       <version>0.2.1</version>
    </dependency>
    ```
 
@@ -141,7 +141,7 @@ covers.
 
 ## Project
 
-**Status:** proof-of-concept (0.2.0), validated by unit + end-to-end tests (`mvn test`) and the
+**Status:** proof-of-concept (0.2.1), validated by unit + end-to-end tests (`mvn test`) and the
 benchmarks above. The [roadmap](docs/roadmap.md) lists what a production v1 would add; release
 history is in the [CHANGELOG](CHANGELOG.md).
 

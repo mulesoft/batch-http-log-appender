@@ -5,7 +5,10 @@ All notable changes to the Batch HTTP Log Appender are recorded here. The format
 [Semantic Versioning](https://semver.org/). Defaults that moved between releases are listed in
 [docs/configuration.md](docs/configuration.md#defaults-that-changed).
 
-## [Unreleased]
+## [0.2.1] — 2026-10-13
+
+A documentation and samples release: no engine or appender code changed, so upgrading from
+0.2.0 needs no configuration changes.
 
 ### Added
 - **Dynatrace sample Mule pair** — `demo/mule/dynatrace-batch-http` (the `<BatchHttp>` appender)
@@ -35,6 +38,7 @@ All notable changes to the Batch HTTP Log Appender are recorded here. The format
   troubleshooting, memory safety, the option reference and the per-vendor examples. Links into
   the moved sections were updated across the repository.
 - `docs/benchmark-results.md` and `docs/benchmark-runbook.md` cover four vendors.
+- The roadmap moved to `docs/roadmap.md`; the batch demos build against `0.2.1`.
 
 ## [0.2.0] — 2026-10-12
 
@@ -248,7 +252,7 @@ No appender code changed.
 - Initial release: the batching Log4j2 appender (`<BatchHttp>`) on a vendor-neutral core
   engine. Pre-publication history lives in the development repository.
 
-[Unreleased]: https://github.com/mulesoft/batch-http-log-appender/compare/v0.2.0...HEAD
+[0.2.1]: https://github.com/mulesoft/batch-http-log-appender/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/mulesoft/batch-http-log-appender/compare/v0.1.5...v0.2.0
 [0.1.5]: https://github.com/mulesoft/batch-http-log-appender/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/mulesoft/batch-http-log-appender/releases/tag/v0.1.4

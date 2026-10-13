@@ -267,7 +267,7 @@ artifact resolved from somewhere else — the failure mode that spoiled the orig
 
 ```bash
 # The root POM's <version>; the batch demos pin the same batchhttp.version.
-VER=0.2.0
+VER=0.2.1
 # Outside the repo, so nothing is extracted into the working tree.
 WORK="$(mktemp -d)"
 
