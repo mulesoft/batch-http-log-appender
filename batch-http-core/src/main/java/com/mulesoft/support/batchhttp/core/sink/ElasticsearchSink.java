@@ -57,6 +57,7 @@ public final class ElasticsearchSink extends AbstractHttpSink {
     private final String apiKey;
     private final String service;
     private final String host;
+    private final boolean deduplicate;
 
     private ElasticsearchSink(Builder b) {
         String base = b.url.endsWith("/") ? b.url.substring(0, b.url.length() - 1) : b.url;
@@ -65,6 +66,7 @@ public final class ElasticsearchSink extends AbstractHttpSink {
         this.apiKey = b.apiKey;
         this.service = b.service == null || b.service.isBlank() ? null : b.service;
         this.host = b.host == null || b.host.isBlank() ? null : b.host;
+        this.deduplicate = b.deduplicate;
     }
 
     @Override
@@ -87,7 +89,15 @@ public final class ElasticsearchSink extends AbstractHttpSink {
      */
     @Override
     protected void writeRecord(StringBuilder sb, LogRecord r) {
-        sb.append("{\"create\":{}}\n");
+        // With an explicit _id, a re-sent copy of a document Elasticsearch already stored is
+        // refused with 409 instead of being stored again (see inspectResponse). A record replayed
+        // from a spill segment written before ids existed has none, and is sent without one.
+        String id = deduplicate ? r.recordId() : null;
+        if (id != null) {
+            sb.append("{\"create\":{"); Json.field(sb, "_id", id); sb.append("}}\n");
+        } else {
+            sb.append("{\"create\":{}}\n");
+        }
         sb.append('{');
         // Data streams require @timestamp, so — unlike Datadog/New Relic — it is always sent.
         Json.field(sb, "@timestamp", isoUtc(r.timestampMillis()));
@@ -119,6 +129,9 @@ public final class ElasticsearchSink extends AbstractHttpSink {
     public boolean reportsPerRecordResults() { return true; }
 
     @Override
+    public boolean wantsRecordIds() { return deduplicate; }
+
+    @Override
     public RecordResults inspectResponse(byte[] body, int batchSize) {
         String json = new String(body, StandardCharsets.UTF_8);
         // filter_path keeps the response order: "errors" comes first, so a clean batch is
@@ -140,14 +153,17 @@ public final class ElasticsearchSink extends AbstractHttpSink {
         int[] retry = new int[n];
         int retryCount = 0;
         int rejected = 0;
+        int duplicates = 0;
         String firstReason = null;
         for (int i = 0; i < n; i++) {
             Map<?, ?> result = actionResult(list.get(i));
             if (result == null) continue;
             int status = result.get("status") instanceof Number ? ((Number) result.get("status")).intValue() : 200;
-            // 409 is a version conflict on `create`: not worth re-sending, so count it delivered.
-            // (IDs are auto-generated, so a re-sent document is stored again, not refused.)
-            if ((status >= 200 && status < 300) || status == 409) continue;
+            if (status >= 200 && status < 300) continue;
+            // 409 on `create` is a version conflict: a document with this _id is already stored,
+            // so this is a re-sent copy of an earlier attempt whose response was lost. It counts
+            // as delivered. (Without deduplication the ids are auto-generated and never conflict.)
+            if (status == 409) { duplicates++; continue; }
             if (status == 429 || status >= 500) {
                 retry[retryCount++] = i;
             } else {
@@ -155,8 +171,8 @@ public final class ElasticsearchSink extends AbstractHttpSink {
                 if (firstReason == null) firstReason = describe(status, result.get("error"));
             }
         }
-        if (retryCount == 0 && rejected == 0) return RecordResults.ALL_ACCEPTED;
-        return new RecordResults(java.util.Arrays.copyOf(retry, retryCount), rejected, firstReason);
+        if (retryCount == 0 && rejected == 0 && duplicates == 0) return RecordResults.ALL_ACCEPTED;
+        return new RecordResults(java.util.Arrays.copyOf(retry, retryCount), rejected, firstReason, duplicates);
     }
 
     /** An item is {@code {"create":{...}}}; return the inner object whatever the action name. */
@@ -187,6 +203,7 @@ public final class ElasticsearchSink extends AbstractHttpSink {
         private String index;
         private String service;
         private String host;
+        private boolean deduplicate = true;
 
         /** Elasticsearch endpoint (scheme, host, optional port); the sink appends the data stream and {@code /_bulk}. */
         public Builder url(String v) { this.url = v; return this; }
@@ -198,6 +215,13 @@ public final class ElasticsearchSink extends AbstractHttpSink {
         public Builder service(String v) { this.service = v; return this; }
         /** ECS {@code host.name}. Optional; omitted when null/blank. */
         public Builder host(String v) { this.host = v; return this; }
+        /**
+         * Send each record with an engine-assigned {@code _id}, so a retry or spill replay of a
+         * batch Elasticsearch already stored is refused as a duplicate (409) instead of stored
+         * twice. On by default. Off restores Elasticsearch-generated ids, which index slightly
+         * faster but make every re-send a possible duplicate.
+         */
+        public Builder deduplicate(boolean v) { this.deduplicate = v; return this; }
 
         public ElasticsearchSink build() {
             if (url == null || url.isBlank())

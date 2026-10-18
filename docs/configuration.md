@@ -346,6 +346,7 @@ a vendor's byte ceiling and be rejected.
 | <a id="opt-maxretrybackoffmillis"></a>`maxRetryBackoffMillis` | long | `10000` | all | Ceiling on the retry wait: it caps the doubling backoff, and it caps a server-supplied `Retry-After` exactly, so an absurd value cannot park a flusher (see note 3). |
 | <a id="opt-requesttimeoutmillis"></a>`requestTimeoutMillis` | long | `10000` | all | Per-request HTTP timeout: how long to wait for the response to one POST; when it expires the attempt counts as a retryable network error. Must be greater than 0 (see note 4). |
 | <a id="opt-shutdowndraintimeoutmillis"></a>`shutdownDrainTimeoutMillis` | long | `5000` | all | On stop, the time the flushers get to send what is queued; stopping takes roughly this value + 2 s + the spill write. What happens to the rest is in note 5. |
+| <a id="opt-deduplicate"></a>`deduplicate` | boolean | `true` | elasticsearch | Sends every document with an appender-assigned `_id`, so a retried or replayed batch that Elasticsearch already stored is refused as a duplicate instead of stored twice (note 6). |
 
 1. `maxRetries`:
    - Only HTTP 408, 429, any 5xx, and network errors or timeouts are retried.
@@ -381,6 +382,22 @@ a vendor's byte ceiling and be rejected.
      last send of the batch it holds, and stop waits only the 2 s grace for it.
 
    The same value is the replayer's join timeout.
+6. `deduplicate`:
+   - Delivery is at-least-once: when a response is lost (a timeout, a reset connection, a 5xx
+     after the write), the batch is sent again, and a spill replay that fails partway re-sends
+     its segment. Without an explicit `_id`, Elasticsearch stores each re-sent copy as a new
+     document.
+   - With `deduplicate` on, the appender gives each record a unique id when it accepts it and
+     keeps that id through every retry, the spill buffer and a replay after a crash. Elasticsearch
+     answers a second copy with 409, which counts as delivered; the stats line reports these as
+     `duplicatesSuppressed`.
+   - The id identifies the delivery, not the content: two separate events with identical text
+     are both stored.
+   - Elasticsearch checks for duplicates within one backing index, so a copy re-sent after a
+     data stream rollover can still be stored twice.
+   - Documents with explicit ids index somewhat more slowly, because Elasticsearch must check
+     whether each id exists. `deduplicate="false"` restores Elasticsearch-generated ids.
+   - Ignored by every other vendor: their intakes have no equivalent key.
 
 ## Disk spill
 
@@ -623,7 +640,8 @@ The appender's own health messages and the stats counters are explained in
    negative turns it off. It shows only with `diagnosticsLevel` `INFO` or finer and
    `<Configuration status="INFO">` or finer. It lets you see delivery is healthy without looking at the spill directory.
    The line is `batch-http[<sink>] stats accepted= sentRecords= sentBatches= dropped=
-   failedBatches= queueDepth=`, plus `spill{onDiskBytes= segments= spilledRecords=
+   failedBatches= queueDepth=`, then `duplicatesSuppressed=` for Elasticsearch with
+   [`deduplicate`](#opt-deduplicate) on, plus `spill{onDiskBytes= segments= spilledRecords=
    droppedRecords= evictedSegments= evictedRecords= adoptedRecords= corruptBytesSkipped=}` when
    spill is on.
 

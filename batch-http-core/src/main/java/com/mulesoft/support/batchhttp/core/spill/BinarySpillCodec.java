@@ -34,7 +34,13 @@ import java.nio.charset.StandardCharsets;
  *   str    throwable                    (only when hasThrowable == 1)
  *   uvarint attributeCount
  *   { str key, str value } * attributeCount
+ *   [ byte 1, str recordId ]           (only when the record has an id)
  * </pre>
+ *
+ * <p>The optional trailing record id is absent from every frame written without one, so a
+ * segment written with ids off is byte-for-byte what earlier versions wrote. A reader that
+ * predates the id treats a frame that carries one as corrupt, which only matters when
+ * downgrading with an id-bearing backlog still on disk.
  *
  * <p>Because every string is written as a byte length followed by its verbatim UTF-8
  * bytes, all character sets round-trip losslessly and there are no escape edge cases
@@ -77,6 +83,10 @@ public final class BinarySpillCodec implements SpillCodec {
             b.writeStr(e.getKey());
             b.writeStr(e.getValue());
         }
+        if (r.recordId() != null) {
+            b.writeByte(1);
+            b.writeStr(r.recordId());
+        }
         return b.toBytes();
     }
 
@@ -102,6 +112,10 @@ public final class BinarySpillCodec implements SpillCodec {
                 String k = c.readStr();
                 String v = c.readStr();
                 rb.attribute(k, v);
+            }
+            if (!c.atEnd()) {
+                if (c.readByte() != 1) return null; // not a tag we wrote — framing desynced
+                rb.recordId(c.readStr());
             }
             if (!c.atEnd()) return null; // trailing garbage — treat as corrupt
             return rb.build();

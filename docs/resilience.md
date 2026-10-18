@@ -21,7 +21,9 @@ engine reports these events is in [troubleshooting.md](troubleshooting.md).
   the 2026-10-12 benchmark a Runtime Manager restart replaced the CloudHub 1.0 worker — see
   [Platform limits](#platform-limits-outside-the-appenders-control).
 - **Replay is at-least-once.** A record that transits the spill buffer can be delivered twice;
-  de-duplicate downstream if that matters.
+  de-duplicate downstream if that matters. For Elasticsearch,
+  [`deduplicate`](configuration.md#opt-deduplicate) (on by default) has the intake refuse the
+  second copy.
 - **Watch `spilledRecords`, not `dropped`.** With spill on, overflow goes to disk, so `dropped`
   can sit at zero while the app is overloaded.
 
@@ -225,6 +227,13 @@ come from three places:
 If something downstream consumes these logs and must not see repeats, de-duplicate on a stable
 field (the preserved event timestamp plus the message, or your own event id) rather than assuming
 the buffer suppresses them.
+
+Elasticsearch is the exception. With [`deduplicate`](configuration.md#opt-deduplicate) on (the
+default), each record gets a unique id when the appender accepts it, and the spill buffer stores
+that id with the record. Every re-send, including a replay after a crash, carries the same
+`_id`, and Elasticsearch refuses a copy it already stores with 409. The stats line counts these
+as `duplicatesSuppressed`. The other vendors' intakes have no such key, so the trade-off above
+still applies to them.
 
 ### Segment sizing is fuzzy and never splits a record
 

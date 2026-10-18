@@ -160,4 +160,38 @@ class SpillCodecRoundTripTest {
                     "the payload stays human-readable JSON");
         }
     }
+
+    // ---- engine-assigned record id ---------------------------------------------------------
+
+    @ParameterizedTest
+    @MethodSource("codecs")
+    void roundTripsTheRecordId(SpillCodec codec) {
+        LogRecord original = LogRecord.builder().timestampMillis(7L).message("m")
+                .attribute("k", "v").build().withRecordId("AAAAAAAAAAEAAAAAAAAAAg");
+        LogRecord decoded = codec.decode(codec.encode(original));
+        assertNotNull(decoded);
+        assertEquals("AAAAAAAAAAEAAAAAAAAAAg", decoded.recordId());
+        assertEquals(original.attributes(), decoded.attributes());
+    }
+
+    @ParameterizedTest
+    @MethodSource("codecs")
+    void aRecordWithoutAnIdEncodesExactlyAsBefore(SpillCodec codec) {
+        // The id is optional on the wire: with none, the frame is the pre-id format, so segments
+        // written with deduplicate off (or by an earlier version) are interchangeable.
+        LogRecord plain = LogRecord.builder().timestampMillis(7L).message("m").attribute("k", "v").build();
+        byte[] withoutId = codec.encode(plain);
+        byte[] withId = codec.encode(plain.withRecordId("x"));
+        assertTrue(withId.length > withoutId.length);
+        assertNull(codec.decode(withoutId).recordId());
+    }
+
+    @Test
+    void binaryFrameWithAnUnknownTrailingTagIsCorrupt() {
+        LogRecord plain = LogRecord.builder().timestampMillis(7L).message("m").build();
+        byte[] ok = SpillCodec.BINARY.encode(plain);
+        byte[] bad = java.util.Arrays.copyOf(ok, ok.length + 2);
+        bad[ok.length] = 7; // not the id tag
+        assertNull(SpillCodec.BINARY.decode(bad));
+    }
 }
