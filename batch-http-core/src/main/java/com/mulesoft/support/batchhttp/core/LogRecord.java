@@ -34,6 +34,10 @@ public final class LogRecord {
     private final String message;
     private final String throwable; // pre-rendered stack trace, or null
     private final Map<String, String> attributes;
+    // Engine-assigned delivery identity, or null. Set once when the engine accepts the record
+    // (only for sinks that ask for it, see LogSink#wantsRecordIds), then carried unchanged
+    // through every retry and through the spill buffer, so a re-sent copy can be recognised.
+    private final String recordId;
 
     private LogRecord(Builder b) {
         this.timestampMillis = b.timestampMillis;
@@ -48,6 +52,18 @@ public final class LogRecord {
         this.attributes = (b.attributes == null || b.attributes.isEmpty())
                 ? Collections.emptyMap()
                 : Collections.unmodifiableMap(b.attributes);
+        this.recordId = b.recordId;
+    }
+
+    private LogRecord(LogRecord src, String recordId) {
+        this.timestampMillis = src.timestampMillis;
+        this.level = src.level;
+        this.loggerName = src.loggerName;
+        this.threadName = src.threadName;
+        this.message = src.message;
+        this.throwable = src.throwable;
+        this.attributes = src.attributes; // already unmodifiable
+        this.recordId = recordId;
     }
 
     public long timestampMillis() { return timestampMillis; }
@@ -57,6 +73,11 @@ public final class LogRecord {
     public String message() { return message; }
     public String throwable() { return throwable; }
     public Map<String, String> attributes() { return attributes; }
+    /** Delivery identity assigned by the engine, or null when the sink does not use one. */
+    public String recordId() { return recordId; }
+
+    /** This record with {@code recordId} set; every other field is shared, not copied. */
+    public LogRecord withRecordId(String recordId) { return new LogRecord(this, recordId); }
 
     public static Builder builder() { return new Builder(); }
 
@@ -69,6 +90,7 @@ public final class LogRecord {
         private String throwable;
         // Lazily allocated on the first attribute so a log line with no MDC pays nothing.
         private Map<String, String> attributes;
+        private String recordId;
 
         public Builder timestampMillis(long v) { this.timestampMillis = v; return this; }
         public Builder level(String v) { this.level = v; return this; }
@@ -76,6 +98,7 @@ public final class LogRecord {
         public Builder threadName(String v) { this.threadName = v; return this; }
         public Builder message(String v) { this.message = v; return this; }
         public Builder throwable(String v) { this.throwable = v; return this; }
+        public Builder recordId(String v) { this.recordId = v; return this; }
         public Builder attribute(String k, String v) {
             if (k != null && v != null) {
                 if (this.attributes == null) this.attributes = new LinkedHashMap<>();

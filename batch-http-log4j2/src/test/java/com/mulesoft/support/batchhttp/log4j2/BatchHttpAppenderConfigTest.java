@@ -172,9 +172,8 @@ class BatchHttpAppenderConfigTest {
                 "the diagnostic must name the vendor, got:\n" + errors);
     }
 
-    /** {@code vendor="elk"} posts _bulk to {@code <url>/<index>/_bulk} with an ApiKey header. */
-    @Test
-    void elkAliasShipsBulkToTheConfiguredDataStream(@TempDir Path dir) throws Exception {
+    /** Ship one event through {@code vendor="elk"} and return the bulk body received. */
+    private String shipOneThroughElk(Path dir, String extraAttributes) throws Exception {
         StringBuilder auth = new StringBuilder();
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/logs-orders-test/_bulk", exchange -> {
@@ -197,7 +196,7 @@ class BatchHttpAppenderConfigTest {
         LoggerContext c = configure(dir, config(
                 "    <BatchHttp name=\"underTest\" vendor=\"elk\" url=\"${sys:batchhttp.cfg.url}\"\n"
                         + "               apiKey=\"encoded-key\" index=\"logs-orders-test\" service=\"orders\"\n"
-                        + "               lingerMillis=\"100\" gzip=\"false\" spillEnabled=\"false\">\n"
+                        + "               lingerMillis=\"100\" gzip=\"false\" spillEnabled=\"false\"" + extraAttributes + ">\n"
                         + "      <PatternLayout pattern=\"%m\"/>\n"
                         + "    </BatchHttp>\n"));
 
@@ -208,11 +207,27 @@ class BatchHttpAppenderConfigTest {
 
         synchronized (body) {
             assertEquals("ApiKey encoded-key", auth.toString());
-            assertTrue(body.toString().startsWith("{\"create\":{}}\n{\"@timestamp\":"), body.toString());
             assertTrue(body.toString().contains("\"message\":\"order placed\""), body.toString());
             assertTrue(body.toString().contains("\"service.name\":\"orders\""), body.toString());
+            return body.toString();
         }
     }
+
+    /** {@code vendor="elk"} posts _bulk to {@code <url>/<index>/_bulk} with an ApiKey header and, by default, an _id. */
+    @Test
+    void elkAliasShipsBulkToTheConfiguredDataStream(@TempDir Path dir) throws Exception {
+        String received = shipOneThroughElk(dir, "");
+        assertTrue(received.matches("(?s)\\{\"create\":\\{\"_id\":\"[A-Za-z0-9_-]{22}\"\\}\\}\n\\{\"@timestamp\":.*"),
+                "deduplicate defaults to on, so the action carries an engine-assigned _id: " + received);
+    }
+
+    /** {@code deduplicate="false"} restores Elasticsearch-generated ids: no _id in the action. */
+    @Test
+    void deduplicateFalseSendsNoDocumentId(@TempDir Path dir) throws Exception {
+        String received = shipOneThroughElk(dir, " deduplicate=\"false\"");
+        assertTrue(received.startsWith("{\"create\":{}}\n{\"@timestamp\":"), received);
+    }
+
 
     @Test
     void aValidConfigStillBuildsAndLogsNoStartupError(@TempDir Path dir) throws Exception {

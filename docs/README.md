@@ -42,7 +42,7 @@ The sample projects come in pairs; [Samples](#samples) explains what each half s
 | [Troubleshooting & diagnostics](troubleshooting.md) | Where the appender's own messages go; what it logs; "no spill files"; programmatic counters |
 | [Validating memory safety and full drain](memory-safety.md) | The invariant to check; bounded memory; full drain after processing |
 | [Building, installing and verifying](building.md) | Build and install locally; verify the build; dependency hygiene and CVE scanning; run the local mock-intake benchmark and example |
-| [Roadmap to production v1](roadmap.md) | What a production v1 would add to the 0.2.1 proof-of-concept |
+| [Roadmap to production v1](roadmap.md) | What a production v1 would add to the 0.2.2 proof-of-concept |
 
 ## Benchmarks
 

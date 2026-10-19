@@ -30,10 +30,11 @@ import java.nio.charset.StandardCharsets;
  * <p>Object shape:
  * <pre>{@code
  * {"ts":1700000000123,"lvl":"INFO","logger":"x","thread":"main","msg":"hi",
- *  "exc":"...stacktrace...","attr":{"requestId":"abc"}}
+ *  "exc":"...stacktrace...","id":"AbCd...","attr":{"requestId":"abc"}}
  * }</pre>
- * {@code exc} is omitted when the record has no throwable; {@code attr} is omitted
- * when there are no attributes; {@code ts} is a bare JSON number, everything else a
+ * {@code exc} is omitted when the record has no throwable; {@code id} (the engine-assigned
+ * record id) is omitted when the record has none; {@code attr} is omitted when there are no
+ * attributes; {@code ts} is a bare JSON number, everything else a
  * quoted string.
  */
 public final class JsonSpillCodec implements SpillCodec {
@@ -64,6 +65,9 @@ public final class JsonSpillCodec implements SpillCodec {
         sb.append(','); Json.field(sb, "msg", r.message());
         if (r.throwable() != null) {
             sb.append(','); Json.field(sb, "exc", r.throwable());
+        }
+        if (r.recordId() != null) {
+            sb.append(','); Json.field(sb, "id", r.recordId());
         }
         if (!r.attributes().isEmpty()) {
             sb.append(',');
@@ -119,6 +123,7 @@ public final class JsonSpillCodec implements SpillCodec {
                         else if ("thread".equals(key)) b.threadName(val);
                         else if ("msg".equals(key)) b.message(val);
                         else if ("exc".equals(key)) b.throwable(val);
+                        else if ("id".equals(key)) b.recordId(val);
                         // Unknown keys are ignored for forward-compatibility.
                     }
                 } while (consumeIf(','));

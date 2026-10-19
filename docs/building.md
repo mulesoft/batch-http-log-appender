@@ -17,7 +17,7 @@ On this page:
 **Prerequisites:** JDK 17+ and Maven 3.8+ (check with `java -version` and `mvn -version`).
 
 The project is a Maven multi-module reactor (`groupId` `com.mulesoft.support.batchhttp`, version
-`0.2.1`). To build everything and install the artifacts into your local Maven repository
+`0.2.2`). To build everything and install the artifacts into your local Maven repository
 (`~/.m2/repository`) so other projects can depend on them:
 
 ```bash
@@ -45,7 +45,7 @@ After install, the artifacts are available to other builds as:
 <dependency>
     <groupId>com.mulesoft.support.batchhttp</groupId>
     <artifactId>batch-http-log4j2</artifactId>
-    <version>0.2.1</version>
+    <version>0.2.2</version>
 </dependency>
 ```
 

@@ -54,6 +54,15 @@ public interface LogSink {
     default boolean reportsPerRecordResults() { return false; }
 
     /**
+     * Whether the engine should give every accepted record a unique {@link LogRecord#recordId()}.
+     * The id is assigned once and kept through every retry and through the spill buffer, so a
+     * sink whose intake can refuse a second copy of the same id (Elasticsearch {@code create}
+     * with an explicit {@code _id}) turns an at-least-once re-send into a stored-once record.
+     * False by default: the other intakes have no such key, and the id would be dead weight.
+     */
+    default boolean wantsRecordIds() { return false; }
+
+    /**
      * Per-record verdict for the 2xx response {@code body} of a batch of {@code batchSize}
      * records. Only called when {@link #reportsPerRecordResults()} is true. A body that cannot
      * be interpreted should count as accepted: re-sending on a guess would duplicate records
@@ -71,11 +80,21 @@ public interface LogSink {
         public final int rejected;
         /** Reason for the first permanent refusal, for diagnostics; null when there was none. */
         public final String rejectedDetail;
+        /**
+         * Number of records the intake refused because it already stores them (a re-sent copy of
+         * an earlier attempt whose response was lost). They count as delivered, not as refused.
+         */
+        public final int duplicates;
 
         public RecordResults(int[] retryable, int rejected, String rejectedDetail) {
+            this(retryable, rejected, rejectedDetail, 0);
+        }
+
+        public RecordResults(int[] retryable, int rejected, String rejectedDetail, int duplicates) {
             this.retryable = retryable;
             this.rejected = rejected;
             this.rejectedDetail = rejectedDetail;
+            this.duplicates = duplicates;
         }
 
         public boolean allAccepted() { return retryable.length == 0 && rejected == 0; }

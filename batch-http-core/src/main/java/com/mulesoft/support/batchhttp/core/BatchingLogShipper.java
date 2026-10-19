@@ -92,6 +92,10 @@ public final class BatchingLogShipper implements AutoCloseable {
     private final AtomicLong sentBatches = new AtomicLong();
     private final AtomicLong sentRecords = new AtomicLong();
     private final AtomicLong failedBatches = new AtomicLong();
+    /** Re-sent records the intake refused because it already stored them (see LogSink#wantsRecordIds). */
+    private final AtomicLong duplicatesSuppressed = new AtomicLong();
+    /** Non-null when the sink wants every record to carry a unique id. */
+    private final RecordIds recordIds;
 
     // Queue-overflow logging throttle: under sustained overflow every application thread
     // would otherwise emit a line per dropped record. We coalesce into at most one WARN per
@@ -127,6 +131,7 @@ public final class BatchingLogShipper implements AutoCloseable {
         // Respect both engine config and the vendor's own ceilings.
         this.effectiveMaxRecords = Math.min(config.maxBatchRecords, sink.limits().maxRecordsPerBatch);
         this.effectiveMaxBytes = Math.min(config.maxBatchBytes, sink.limits().maxUncompressedBytes);
+        this.recordIds = sink.wantsRecordIds() ? new RecordIds() : null;
 
         SpillStore store = null;
         SpillReplayer replayer = null;
@@ -300,6 +305,7 @@ public final class BatchingLogShipper implements AutoCloseable {
                 .append(" dropped=").append(s.dropped)
                 .append(" failedBatches=").append(s.failedBatches)
                 .append(" queueDepth=").append(s.queueDepth);
+        if (recordIds != null) sb.append(" duplicatesSuppressed=").append(s.duplicatesSuppressed);
         SpillStore.SpillStats sp = spillStats();
         if (sp != null) {
             sb.append(" spill{onDiskBytes=").append(sp.totalBytes)
@@ -355,6 +361,9 @@ public final class BatchingLogShipper implements AutoCloseable {
     private boolean offerWhileRunning(LogRecord record) {
         if (!running.get()) return false;
         record = truncateMessage(record);
+        // The id is assigned before the record can reach the queue or the spill buffer, so every
+        // later copy of it (a retry, a spilled frame, a replay after a crash) carries the same id.
+        if (recordIds != null && record.recordId() == null) record = record.withRecordId(recordIds.next());
         accepted.incrementAndGet();
         // NOTE: deliberately an if/else chain rather than `switch (enum)`. A switch
         // on an enum makes javac emit a synthetic $SwitchMap helper class
@@ -487,7 +496,8 @@ public final class BatchingLogShipper implements AutoCloseable {
                 .loggerName(record.loggerName())
                 .threadName(record.threadName())
                 .message(capped)
-                .throwable(record.throwable());
+                .throwable(record.throwable())
+                .recordId(record.recordId());
         record.attributes().forEach(b::attribute);
         return b.build();
     }
@@ -589,6 +599,7 @@ public final class BatchingLogShipper implements AutoCloseable {
         n += utf8Length(r.message());
         n += utf8Length(r.throwable());
         n += utf8Length(r.loggerName()) + utf8Length(r.threadName());
+        if (r.recordId() != null) n += utf8Length(r.recordId()) + 12; // e.g. ES {"_id":"…"} in the action line
         for (var e : r.attributes().entrySet()) n += utf8Length(e.getKey()) + utf8Length(e.getValue()) + 8;
         return n;
     }
@@ -766,6 +777,7 @@ public final class BatchingLogShipper implements AutoCloseable {
         LogSink.RecordResults r = sink.reportsPerRecordResults() && body != null
                 ? sink.inspectResponse(body, sent.size())
                 : LogSink.RecordResults.ALL_ACCEPTED;
+        if (r.duplicates > 0) duplicatesSuppressed.addAndGet(r.duplicates);
         if (r.allAccepted()) {
             sentRecords.addAndGet(sent.size());
             return java.util.Collections.emptyList();
@@ -851,7 +863,7 @@ public final class BatchingLogShipper implements AutoCloseable {
     /** Stats snapshot for diagnostics/metrics. */
     public Stats stats() {
         return new Stats(accepted.get(), dropped.get(), sentBatches.get(),
-                sentRecords.get(), failedBatches.get(), queue.size());
+                sentRecords.get(), failedBatches.get(), queue.size(), duplicatesSuppressed.get());
     }
 
     @Override
@@ -1018,7 +1030,15 @@ public final class BatchingLogShipper implements AutoCloseable {
 
     public static final class Stats {
         public final long accepted, dropped, sentBatches, sentRecords, failedBatches, queueDepth;
-        Stats(long accepted, long dropped, long sentBatches, long sentRecords, long failedBatches, long queueDepth) {
+        /**
+         * Records counted in {@code sentRecords} that the intake refused as copies it already
+         * stored — re-sends whose earlier attempt succeeded but whose response was lost. Always 0
+         * for a sink that does not use record ids.
+         */
+        public final long duplicatesSuppressed;
+        Stats(long accepted, long dropped, long sentBatches, long sentRecords, long failedBatches, long queueDepth,
+              long duplicatesSuppressed) {
+            this.duplicatesSuppressed = duplicatesSuppressed;
             this.accepted = accepted;
             this.dropped = dropped;
             this.sentBatches = sentBatches;
@@ -1029,7 +1049,8 @@ public final class BatchingLogShipper implements AutoCloseable {
         @Override public String toString() {
             return "Stats{accepted=" + accepted + ", dropped=" + dropped
                     + ", sentBatches=" + sentBatches + ", sentRecords=" + sentRecords
-                    + ", failedBatches=" + failedBatches + ", queueDepth=" + queueDepth + '}';
+                    + ", failedBatches=" + failedBatches + ", queueDepth=" + queueDepth
+                    + ", duplicatesSuppressed=" + duplicatesSuppressed + '}';
         }
     }
 }

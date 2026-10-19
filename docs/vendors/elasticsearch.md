@@ -413,9 +413,13 @@ If the response body cannot be parsed, the batch counts as accepted, so the sink
 on a guess.
 
 > [!IMPORTANT]
-> **Delivery is at-least-once.** Elasticsearch generates the IDs, so a re-sent batch can store
-> the same document twice. A re-send happens on a retry after a timeout, on a spill replay, or
-> when a segment exhausts its retries.
+> **Re-sent batches are stored once.** Delivery is at-least-once: a batch is sent again after a
+> timeout or a lost response, on a spill replay, or when a segment exhausts its retries. With
+> [`deduplicate`](../configuration.md#opt-deduplicate) on (the default), every document carries
+> an `_id` the appender assigned when it accepted the record, so Elasticsearch refuses a second
+> copy with 409 and stores each record once. The stats line counts these as
+> `duplicatesSuppressed`. A copy re-sent after a data stream rollover lands in the new backing
+> index and can still be stored twice.
 
 ## Verify delivery
 
@@ -570,7 +574,7 @@ Delivery: batch holds at 100% in every test; stock's share varies by test and pl
 | Mule app ships nothing; DNS failures for `set-elastic-url.invalid` | The sample's fallback URL: `elastic.url` was never set | Set `elastic.url` (note 4) |
 | `ERROR ... endpoint rejected the batch (HTTP 401)` or `(HTTP 403)` | Wrong, revoked or missing key, or missing privileges (note 5) | Recreate the key as in [Set up](#set-up-elasticsearch) (note 6) |
 | `ERROR ... dropped N of M record(s) — the intake accepted the request but refused them` (note 7) | A field-mapping conflict (note 8) | Fix or rename the conflicting field, or the pipeline's `target_field` (note 8) |
-| Duplicate documents after a timeout, a restart or a spill replay | Delivery is at-least-once; Elasticsearch generates the IDs | Expected. Deduplicate downstream if exact counts matter. |
+| Duplicate documents after a timeout, a restart or a spill replay | `deduplicate="false"`, a version before 0.2.2, or a data stream rollover between the first send and the re-send | Leave [`deduplicate`](../configuration.md#opt-deduplicate) on (the default); `duplicatesSuppressed` in the stats line shows the re-sends it absorbed |
 | `message` shows the JSON as one text string | Elasticsearch does not parse JSON inside `message` | Add the `logs@custom` pipeline from [Set up](#set-up-elasticsearch) |
 | `includeTimestamp="false"` has no effect | The sink always sends `@timestamp`; data streams require it | By design |
 | Writes fail for a custom `index` name | A name outside `logs-*-*` has no matching template, so no auto-created data stream | Use a `logs-<dataset>-<namespace>` name, or create your own index template |

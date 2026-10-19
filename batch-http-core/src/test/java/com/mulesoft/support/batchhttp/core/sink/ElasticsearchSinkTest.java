@@ -154,4 +154,54 @@ class ElasticsearchSinkTest {
         assertEquals(Map.of(), m.get("b"));
         assertThrows(IllegalArgumentException.class, () -> new ElasticsearchSink.MiniJson("{\"a\":1} x").parse());
     }
+
+    // ---- deduplication: engine-assigned _id ------------------------------------------------
+
+    private static String actionLine(ElasticsearchSink sink, LogRecord r) {
+        String body = new String(sink.serialize(List.of(r)), StandardCharsets.UTF_8);
+        return body.substring(0, body.indexOf('\n'));
+    }
+
+    @Test
+    void sendsTheRecordIdAsTheDocumentIdByDefault() {
+        ElasticsearchSink sink = ElasticsearchSink.builder().url(URL).apiKey("K").build();
+        assertTrue(sink.wantsRecordIds(), "deduplicate is on by default");
+        assertEquals("{\"create\":{\"_id\":\"AAAAAAAAAAEAAAAAAAAAAg\"}}",
+                actionLine(sink, sample().withRecordId("AAAAAAAAAAEAAAAAAAAAAg")));
+    }
+
+    @Test
+    void aRecordWithoutAnIdIsSentWithoutOne() {
+        // e.g. replayed from a spill segment written before ids existed
+        ElasticsearchSink sink = ElasticsearchSink.builder().url(URL).apiKey("K").build();
+        assertEquals("{\"create\":{}}", actionLine(sink, sample()));
+    }
+
+    @Test
+    void deduplicateOffSendsNoIdEvenWhenTheRecordHasOne() {
+        ElasticsearchSink sink = ElasticsearchSink.builder().url(URL).apiKey("K").deduplicate(false).build();
+        assertFalse(sink.wantsRecordIds());
+        assertEquals("{\"create\":{}}", actionLine(sink, sample().withRecordId("abc")));
+    }
+
+    @Test
+    void a409IsCountedAsADuplicateAndDelivered() {
+        String body = "{\"errors\":true,\"items\":["
+                + "{\"create\":{\"status\":201}},"
+                + "{\"create\":{\"status\":409,\"error\":{\"type\":\"version_conflict_engine_exception\"}}},"
+                + "{\"create\":{\"status\":409,\"error\":{\"type\":\"version_conflict_engine_exception\"}}},"
+                + "{\"create\":{\"status\":429}}]}";
+        ElasticsearchSink.RecordResults r = inspect(body, 4);
+        assertEquals(2, r.duplicates);
+        assertEquals(0, r.rejected, "a duplicate is not a refusal");
+        assertArrayEquals(new int[]{3}, r.retryable, "only the throttled document is re-sent");
+    }
+
+    @Test
+    void onlyDuplicatesIsStillAllAcceptedButCounted() {
+        String body = "{\"errors\":true,\"items\":[{\"create\":{\"status\":409}},{\"create\":{\"status\":201}}]}";
+        ElasticsearchSink.RecordResults r = inspect(body, 2);
+        assertTrue(r.allAccepted());
+        assertEquals(1, r.duplicates);
+    }
 }

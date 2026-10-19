@@ -161,6 +161,8 @@ public final class BatchHttpAppender extends AbstractAppender {
             @PluginAttribute("source") String source,
             @PluginAttribute("index") String index,
             @PluginAttribute("sourcetype") String sourcetype,
+            // elasticsearch only: send engine-assigned _ids so a re-sent batch is stored once
+            @PluginAttribute(value = "deduplicate", defaultBoolean = true) boolean deduplicate,
             // --- batching tuning ---
             @PluginAttribute(value = "maxBatchRecords", defaultInt = 200) int maxBatchRecords,
             @PluginAttribute(value = "maxBatchBytes", defaultInt = 1048576) int maxBatchBytes,
@@ -223,7 +225,7 @@ public final class BatchHttpAppender extends AbstractAppender {
         LogSink sink;
         try {
             sink = buildSink(v, url, site, host, hostname, apiKey, token,
-                    service, source, index, sourcetype, includeTimestamp);
+                    service, source, index, sourcetype, includeTimestamp, deduplicate);
         } catch (RuntimeException e) {
             // The sink builders reject a missing credential by throwing. Left uncaught it would
             // escape the @PluginFactory and Log4j2 would report only a generic "unable to invoke
@@ -324,7 +326,8 @@ public final class BatchHttpAppender extends AbstractAppender {
     /** Builds the vendor sink, or throws {@link IllegalArgumentException} naming the missing credential. */
     private static LogSink buildSink(String v, String url, String site, String host, String hostname,
                                      String apiKey, String token, String service, String source,
-                                     String index, String sourcetype, boolean includeTimestamp) {
+                                     String index, String sourcetype, boolean includeTimestamp,
+                                     boolean deduplicate) {
         switch (v) {
             case "datadog":
                 // `host` maps to Datadog's reserved host facet (optional); `site` is the
@@ -356,8 +359,10 @@ public final class BatchHttpAppender extends AbstractAppender {
             case "elk":
                 // `url` is the Elasticsearch endpoint and `index` the target data stream (default
                 // logs-mule-default); `service`/`host` become the ECS service.name/host.name fields.
+                // `deduplicate` (default on) sends an engine-assigned _id with every document.
                 return ElasticsearchSink.builder()
-                        .url(url).apiKey(apiKey).index(index).service(service).host(host).build();
+                        .url(url).apiKey(apiKey).index(index).service(service).host(host)
+                        .deduplicate(deduplicate).build();
             case "generic":
             default:
                 GenericNdjsonSink.Builder gb = GenericNdjsonSink.builder().url(url);
