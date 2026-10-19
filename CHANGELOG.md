@@ -5,7 +5,10 @@ All notable changes to the Batch HTTP Log Appender are recorded here. The format
 [Semantic Versioning](https://semver.org/). Defaults that moved between releases are listed in
 [docs/configuration.md](docs/configuration.md#defaults-that-changed).
 
-## [Unreleased]
+## [0.2.2] — 2026-10-19
+
+Elasticsearch now stores each record once, even when a batch is sent again. Upgrading from 0.2.1
+needs no configuration change: bump the dependency version.
 
 ### Added
 - **Elasticsearch: re-sent batches are stored once** (`deduplicate`, on by default). The engine
@@ -20,6 +23,9 @@ All notable changes to the Batch HTTP Log Appender are recorded here. The format
 - Elasticsearch documents now carry an appender-assigned `_id` by default. Elasticsearch indexes
   documents with explicit ids somewhat more slowly; a copy re-sent after a data stream rollover
   can still be stored twice.
+- The Elasticsearch batch demo builds against `0.2.2`; on CloudHub 2.0 it delivered exactly
+  100% of its logs in all four benchmark tests (2026-10-19), with Test 3 throughput in line with
+  0.2.0.
 - Spill frames carry the record id when it is present. Frames without one are unchanged, so
   segments written with `deduplicate="false"` or by earlier versions still replay; a 0.2.1 reader
   cannot replay id-bearing segments, which matters only when downgrading with a backlog on disk.
@@ -271,7 +277,7 @@ No appender code changed.
 - Initial release: the batching Log4j2 appender (`<BatchHttp>`) on a vendor-neutral core
   engine. Pre-publication history lives in the development repository.
 
-[Unreleased]: https://github.com/mulesoft/batch-http-log-appender/compare/v0.2.1...HEAD
+[0.2.2]: https://github.com/mulesoft/batch-http-log-appender/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/mulesoft/batch-http-log-appender/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/mulesoft/batch-http-log-appender/compare/v0.1.5...v0.2.0
 [0.1.5]: https://github.com/mulesoft/batch-http-log-appender/compare/v0.1.4...v0.1.5

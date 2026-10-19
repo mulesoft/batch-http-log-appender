@@ -13,7 +13,7 @@
     -->
     <properties>
         <app.runtime>4.9.15</app.runtime>
-        <batchhttp.version>0.2.1</batchhttp.version>
+        <batchhttp.version>0.2.2</batchhttp.version>
         <maven.compiler.release>17</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <mule.maven.plugin.version>4.10.0</mule.maven.plugin.version>
