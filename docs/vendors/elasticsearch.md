@@ -21,7 +21,7 @@ and lifecycle.
 | Authentication | Elasticsearch API key, sent as `Authorization: ApiKey <apiKey>` |
 | Required options | [`url`](../configuration.md#opt-url), [`apiKey`](../configuration.md#opt-apikey) |
 | Sample Mule project | [elastic-batch-http](../../demo/mule/elastic-batch-http/) / [elastic-stock-http](../../demo/mule/elastic-stock-http/) |
-| Benchmarked on CloudHub | Yes, 2026-10-12 (engine 0.2.0) |
+| Benchmarked on CloudHub | Yes, 2026-10-12 (engine 0.2.0); CloudHub 2.0 batch re-checked 2026-10-19 (0.2.2) |
 
 On this page:
 
@@ -295,6 +295,7 @@ Things to know about this sample:
 | [`index`](../configuration.md#opt-index) | The target data stream (or index); `logs-mule-default` when unset or blank |
 | [`service`](../configuration.md#opt-service) | Written to ECS `service.name` on every document; omitted when unset or blank |
 | [`host`](../configuration.md#opt-host) | Written to ECS `host.name` on every document; omitted when unset or blank |
+| [`deduplicate`](../configuration.md#opt-deduplicate) | On by default: each document carries an appender-assigned `_id`, so a re-sent copy is refused instead of stored twice (note 4) |
 | [`token`](../configuration.md#opt-token) | Not read. Use `apiKey`. |
 | [`site`](../configuration.md#opt-site), [`hostname`](../configuration.md#opt-hostname), [`source`](../configuration.md#opt-source), [`sourcetype`](../configuration.md#opt-sourcetype) | Ignored |
 | [`includeTimestamp`](../configuration.md#opt-includetimestamp) | Ignored: `@timestamp` is always sent, because data streams require it |
@@ -307,15 +308,20 @@ Things to know about this sample:
    masks the value in its status output.
 3. The trailing newline is stripped and the size is capped by
    [`maxMessageBytes`](../configuration.md#opt-maxmessagebytes).
+4. `deduplicate="false"` lets Elasticsearch generate the ids, which indexes slightly faster but
+   lets a re-sent batch be stored twice. See [Which responses retry or drop](#request).
 
 Every other option (batching, queue, retries, spill, TLS, diagnostics) applies unchanged; see
 the [configuration reference](../configuration.md).
 
 ## What gets sent
 
-Each event becomes two NDJSON lines in the bulk body: the action `{"create":{}}`, then the
-document. `create` is the only action a data stream accepts. No `_id` is sent, so Elasticsearch
-generates the document IDs. The body ends with the trailing newline that `_bulk` requires.
+Each event becomes two NDJSON lines in the bulk body: the action, then the document. The action
+is `{"create":{"_id":"<id>"}}`: `create` is the only action a data stream accepts, and the `_id`
+is a 22-character id the appender gave the record when it accepted it. The same id is sent on
+every retry and replay, which is what lets Elasticsearch refuse a copy it already stores. With
+[`deduplicate="false"`](../configuration.md#opt-deduplicate) the action is `{"create":{}}` and
+Elasticsearch generates the ids. The body ends with the trailing newline that `_bulk` requires.
 
 <a id="request"></a>
 
@@ -401,7 +407,7 @@ was accepted. Otherwise each item is classified:
 | Item status | Outcome |
 | --- | --- |
 | `2xx` | Delivered |
-| `409` (version conflict on `create`) | Counted as delivered, not re-sent |
+| `409` (version conflict on `create`) | Elasticsearch already stores a document with this `_id`: a re-sent copy. Counted as delivered and in `duplicatesSuppressed`, not re-sent |
 | `429` or `5xx` | Only these documents are re-sent, as a smaller batch on the normal backoff schedule |
 | Any other `4xx` (mapping conflict, `document_parsing_exception`, …) | Permanent: counted in `dropped`, with an ERROR that quotes the first reason (note 1) |
 
@@ -472,6 +478,23 @@ Set [`statsIntervalMillis`](../configuration.md#opt-statsintervalmillis) with
 `queueDepth` and the spill counters. A non-zero `dropped` together with the "intake accepted the
 request but refused them" ERROR means Elasticsearch refused documents on mapping grounds.
 
+### Check for duplicates
+
+A document stored twice has the same timestamp, logger, thread and message as its copy. This
+query counts such groups in a time window (same read key as above):
+
+```text
+FROM logs-mule-default
+| WHERE @timestamp >= "2026-10-18T23:00:00Z" AND @timestamp <= "2026-10-18T23:40:00Z"
+| STATS c = COUNT(*) BY @timestamp, log.logger, process.thread.name, message
+| WHERE c > 1
+| STATS duplicate_groups = COUNT(*), extra_documents = SUM(c) - COUNT(*)
+```
+
+Keep `message` in the grouping: without it, separate events logged by one thread in the same
+millisecond (a loop, a batch of lines per request) count as copies. With `deduplicate` on, the
+result is 0 apart from any copy re-sent across a data stream rollover.
+
 ## Benchmark on CloudHub
 
 One run on 2026-10-12 with engine 0.2.0 and disk spill on, on 0.1 vCore workers in Sydney; for
@@ -517,6 +540,23 @@ within one table, not CloudHub 1.0 with 2.0.
 | 2 (churn) | 46.75 / 0.27 | 175.9× | 0.186 / 26.65 | 100.0% / 0.0% |
 | 3 (5 min) | 35.68 / 0.73 | 48.6× | 0.249 / 26.50 | 100.0% / 32.9% |
 | 4 (5 min, `-t 30s`) | 38.05 / 0.76 | 50.3× | 0.224 / 26.09 | 100.0% / 109.0% |
+
+### 0.2.2 check on CloudHub 2.0
+
+On 2026-10-19 the CloudHub 2.0 batch app was rebuilt with 0.2.2 (`deduplicate` on) and run
+through the same four tests, alone. Every document carried an appender-assigned `_id`, and
+delivery was exact: no record lost and none stored twice.
+
+| Test | Req/s (0.2.0 / 0.2.2) | p90 s (0.2.0 / 0.2.2) | Delivered with 0.2.2 |
+| --- | --- | --- | --- |
+| 1 (1 min) | 18.14 / 14.74 | 0.443 / 0.517 | 100.0% (19,558) |
+| 2 (churn) | 46.75 / 36.68 | 0.186 / 0.235 | 100.0% (48,466) |
+| 3 (5 min) | 35.68 / 38.45 | 0.249 / 0.249 | 100.0% (253,792) |
+| 4 (5 min, `-t 30s`) | 38.05 / 42.75 | 0.224 / 0.210 | 100.0% (282,238) |
+
+These are single runs six days apart; read the 1-minute differences as directional. The 0.2.0
+run above shows what deduplication removes: CloudHub 1.0 batch delivered 100.2% in Test 2,
+consistent with a few re-sent batches stored twice.
 
 ### Charts
 
