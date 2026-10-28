@@ -282,10 +282,10 @@ Each value has a reason:
 - [`maxTotalSpillBytes`](../configuration.md#opt-maxtotalspillbytes)`="268435456"` (256 MiB):
   room for a burst longer than New Relic takes in from a distant region. Size it to the disk,
   together with [`minFreeDiskBytes`](../configuration.md#opt-minfreediskbytes).
-- [`statsIntervalMillis`](../configuration.md#opt-statsintervalmillis) with
-  [`diagnosticsLevel`](../configuration.md#opt-diagnosticslevel)`="INFO"`: prints a once-a-minute
-  heartbeat (see [Verify delivery](#verify-delivery)). It needs `<Configuration status>` at
-  `INFO` or finer.
+- [`statsIntervalMillis`](../configuration.md#opt-statsintervalmillis): logs a once-a-minute
+  heartbeat to the application log (see [Verify delivery](#verify-delivery)). On the console it
+  also needs [`diagnosticsLevel`](../configuration.md#opt-diagnosticslevel)`="INFO"` and
+  `<Configuration status>` at `INFO` or finer.
 
 > [!WARNING]
 > Where a host may start with an old spill directory, such as a reused VM or a restored volume,

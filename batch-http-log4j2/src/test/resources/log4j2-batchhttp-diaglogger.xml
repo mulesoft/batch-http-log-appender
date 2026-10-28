@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+
+    Copyright (c) 2026, Salesforce, Inc.
+    SPDX-License-Identifier: Apache-2.0
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+
+-->
+<!--
+  DiagnosticsLoggerTest: the appenders sit on the ROOT logger (as on CloudHub 2.0, where the
+  platform attaches its own appenders to root), so the events of every appender's diagnostics
+  logger (com.mulesoft.support.batchhttp.diagnostics.<name>) reach both of them. Each appender
+  must discard all of them, its own and the other's, instead of shipping them.
+-->
+<Configuration status="OFF" packages="com.mulesoft.support.batchhttp.log4j2">
+
+    <Appenders>
+        <BatchHttp name="testBatch"
+                   vendor="generic"
+                   url="${sys:batchhttp.it.url}"
+                   maxBatchRecords="5"
+                   lingerMillis="50"
+                   maxRetries="0"
+                   gzip="false"
+                   spillEnabled="false"
+                   diagnosticsLevel="INFO"
+                   statsIntervalMillis="100">
+            <PatternLayout pattern="%m"/>
+        </BatchHttp>
+        <BatchHttp name="otherBatch"
+                   vendor="generic"
+                   url="${sys:batchhttp.it.url2}"
+                   maxBatchRecords="5"
+                   lingerMillis="50"
+                   maxRetries="0"
+                   gzip="false"
+                   spillEnabled="false"
+                   statsIntervalMillis="100">
+            <PatternLayout pattern="%m"/>
+        </BatchHttp>
+    </Appenders>
+
+    <Loggers>
+        <Root level="INFO">
+            <AppenderRef ref="testBatch"/>
+            <AppenderRef ref="otherBatch"/>
+        </Root>
+    </Loggers>
+</Configuration>

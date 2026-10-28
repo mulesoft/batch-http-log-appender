@@ -377,10 +377,11 @@ staying on disk is expected and harmless.
 
 The dead process's segments are then adopted (`spillRecoveryMode=ADOPT`) and replay starts
 **immediately**, without waiting for the replay interval. An INFO line says how much was
-recovered. It is shown only with [`diagnosticsLevel`](configuration.md#opt-diagnosticslevel)`="INFO"`
-and `status="INFO"` or finer; the defaults are `WARN`, so otherwise confirm recovery from the
-`adoptedRecords` counter or the heartbeat — see
-[troubleshooting.md](troubleshooting.md#where-the-messages-go).
+recovered. It is raised while the appender is starting, so it goes to the console only, and
+only with [`diagnosticsLevel`](configuration.md#opt-diagnosticslevel)`="INFO"` and
+`status="INFO"` or finer. Where the console is not shown, confirm recovery from
+`adoptedRecords` in the first heartbeat after start — see
+[troubleshooting.md](troubleshooting.md#how-the-diagnostics-logger-works).
 
 This needs the **same `spillDirectory` and the same `spillInstanceId`**. The instance id defaults
 to the appender name; for the Generic sink without an explicit id the engine default includes the

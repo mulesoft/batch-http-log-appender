@@ -196,9 +196,8 @@ Why these values:
   derived from the sink name, which embeds the `url` host (`Generic_<host>_`). With an explicit
   path, a host change cannot strand the backlog, and it can point at persistent, writable storage
   instead of `java.io.tmpdir`. See [Resilience](../resilience.md).
-- [`diagnosticsLevel`](../configuration.md#opt-diagnosticslevel) `INFO` with
-  [`statsIntervalMillis`](../configuration.md#opt-statsintervalmillis) `60000` prints a
-  once-a-minute delivery heartbeat, provided `<Configuration status>` is also `INFO` or finer (see
+- [`statsIntervalMillis`](../configuration.md#opt-statsintervalmillis) `60000` logs a
+  once-a-minute delivery heartbeat to the application log (see
   [Verify delivery](#verify-delivery)). Without a vendor UI, this heartbeat is your main signal
   that the collector is accepting batches.
 
@@ -392,10 +391,13 @@ There is no vendor UI, so check from both ends.
 
 ### The appender's own heartbeat
 
-With [`diagnosticsLevel`](../configuration.md#opt-diagnosticslevel) `INFO`,
-[`statsIntervalMillis`](../configuration.md#opt-statsintervalmillis) set, and
-`<Configuration status>` at `INFO` or finer, the Log4j2 StatusLogger prints a line like this for
-every interval (wrapped here for width; in the log it is one line):
+With [`statsIntervalMillis`](../configuration.md#opt-statsintervalmillis) set, the logger
+`com.mulesoft.support.batchhttp.diagnostics.<appender name>` logs a line like this at INFO for
+every interval (wrapped here for width; in the log it is one line). With the root logger at
+`INFO` it is in the application log; on the console it needs
+[`diagnosticsLevel`](../configuration.md#opt-diagnosticslevel) `INFO` and
+`<Configuration status="INFO">` (see
+[Where the messages go](../troubleshooting.md#where-the-messages-go)):
 
 ```text
 batch-http[Generic(logs.internal.example.com)] stats accepted=1200 sentRecords=1200

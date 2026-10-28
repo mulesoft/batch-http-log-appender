@@ -17,7 +17,7 @@ On this page:
 **Prerequisites:** JDK 17+ and Maven 3.8+ (check with `java -version` and `mvn -version`).
 
 The project is a Maven multi-module reactor (`groupId` `com.mulesoft.support.batchhttp`, version
-`0.2.2`). To build everything and install the artifacts into your local Maven repository
+`0.3.0`). To build everything and install the artifacts into your local Maven repository
 (`~/.m2/repository`) so other projects can depend on them:
 
 ```bash
@@ -45,7 +45,7 @@ After install, the artifacts are available to other builds as:
 <dependency>
     <groupId>com.mulesoft.support.batchhttp</groupId>
     <artifactId>batch-http-log4j2</artifactId>
-    <version>0.2.2</version>
+    <version>0.3.0</version>
 </dependency>
 ```
 
@@ -85,8 +85,26 @@ mvn -Psecurity verify
 
 Notes on the CVE gate:
 
-- **The `security` profile is opt-in**, because a full NVD scan is slow and benefits from an
-  [NVD API key](https://nvd.nist.gov/developers/request-an-api-key) (`-Dnvd.api.key=…`).
+- **There is little to find.** The scan skips test libraries, so in practice it checks log4j
+  2.x (see the list above) and nothing else. It is a release check, not part of every local
+  build, which is why the `security` profile is opt-in.
+- **The scan downloads the NVD database first.** Without an
+  [NVD API key](https://nvd.nist.gov/developers/request-an-api-key) NVD throttles that download
+  hard; a key makes it several times faster, though the first run still takes a while. Later
+  runs fetch only updates. Keep the key out of the command line: add it to
+  `~/.m2/settings.xml` as a server entry and pass its id.
+
+  ```xml
+  <server>
+      <id>nvd</id>
+      <password>your-nvd-api-key</password>
+  </server>
+  ```
+
+  ```bash
+  mvn -Psecurity verify -DskipTests -DnvdApiServerId=nvd
+  ```
+
 - Wire `mvn -Psecurity verify` into CI (nightly or pre-release) rather than every local build.
 - Accepted/false-positive findings go in a `dependency-check-suppressions.xml`.
 

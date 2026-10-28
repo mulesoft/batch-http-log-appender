@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+
+    Copyright (c) 2026, Salesforce, Inc.
+    SPDX-License-Identifier: Apache-2.0
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+
+-->
+<!--
+  DiagnosticsLoggerVendorsTest: one appender per vendor, all on the ROOT logger, each against its
+  own local HTTPS intake (self-signed, hence trustAllCertificates). Datadog and New Relic build
+  https://<site|host>/... themselves, so they get host:port; the others take a URL. Every
+  appender receives every other appender's diagnostics and must ship none of them.
+-->
+<Configuration status="OFF" packages="com.mulesoft.support.batchhttp.log4j2">
+
+    <Appenders>
+        <BatchHttp name="dd" vendor="datadog" site="${sys:batchhttp.vt.datadog}" apiKey="k"
+                   maxBatchRecords="5" lingerMillis="50" maxRetries="0" gzip="false"
+                   spillEnabled="false" trustAllCertificates="true" statsIntervalMillis="100">
+            <PatternLayout pattern="%m"/>
+        </BatchHttp>
+        <BatchHttp name="splunk" vendor="splunk" url="${sys:batchhttp.vt.splunk}" token="t"
+                   maxBatchRecords="5" lingerMillis="50" maxRetries="0" gzip="false"
+                   spillEnabled="false" trustAllCertificates="true" statsIntervalMillis="100">
+            <PatternLayout pattern="%m"/>
+        </BatchHttp>
+        <BatchHttp name="nr" vendor="newrelic" host="${sys:batchhttp.vt.newrelic}" apiKey="k"
+                   maxBatchRecords="5" lingerMillis="50" maxRetries="0" gzip="false"
+                   spillEnabled="false" trustAllCertificates="true" statsIntervalMillis="100">
+            <PatternLayout pattern="%m"/>
+        </BatchHttp>
+        <BatchHttp name="dt" vendor="dynatrace" url="${sys:batchhttp.vt.dynatrace}" token="t"
+                   maxBatchRecords="5" lingerMillis="50" maxRetries="0" gzip="false"
+                   spillEnabled="false" trustAllCertificates="true" statsIntervalMillis="100">
+            <PatternLayout pattern="%m"/>
+        </BatchHttp>
+        <BatchHttp name="es" vendor="elasticsearch" url="${sys:batchhttp.vt.elasticsearch}"
+                   apiKey="k" maxBatchRecords="5" lingerMillis="50" maxRetries="0" gzip="false"
+                   spillEnabled="false" trustAllCertificates="true" statsIntervalMillis="100">
+            <PatternLayout pattern="%m"/>
+        </BatchHttp>
+        <BatchHttp name="gen" vendor="generic" url="${sys:batchhttp.vt.generic}"
+                   maxBatchRecords="5" lingerMillis="50" maxRetries="0" gzip="false"
+                   spillEnabled="false" trustAllCertificates="true" statsIntervalMillis="100">
+            <PatternLayout pattern="%m"/>
+        </BatchHttp>
+    </Appenders>
+
+    <Loggers>
+        <Root level="INFO">
+            <AppenderRef ref="dd"/>
+            <AppenderRef ref="splunk"/>
+            <AppenderRef ref="nr"/>
+            <AppenderRef ref="dt"/>
+            <AppenderRef ref="es"/>
+            <AppenderRef ref="gen"/>
+        </Root>
+    </Loggers>
+</Configuration>

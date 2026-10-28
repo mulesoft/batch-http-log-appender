@@ -48,7 +48,8 @@ On this page:
   - [Payload and fields](#payload-and-fields): [`maxMessageBytes`](#opt-maxmessagebytes) ·
     [`includeStackTrace`](#opt-includestacktrace) · [`includeTimestamp`](#opt-includetimestamp)
   - [Diagnostics](#diagnostics): [`diagnosticsLevel`](#opt-diagnosticslevel) ·
-    [`statsIntervalMillis`](#opt-statsintervalmillis)
+    [`statsIntervalMillis`](#opt-statsintervalmillis) ·
+    [Turning the messages on and off with logger levels](#turning-the-messages-on-and-off-with-logger-levels)
 - Reference: [Vendor field mapping](#vendor-field-mapping) ·
   [How invalid values behave](#how-invalid-values-behave) ·
   [Builder-only knobs](#builder-only-knobs) · [Defaults that changed](#defaults-that-changed)
@@ -631,14 +632,16 @@ The appender's own health messages and the stats counters are explained in
 | <a id="opt-diagnosticslevel"></a>`diagnosticsLevel` | String (Log4j2 level) | `WARN` | all | Minimum level of the appender's own health messages; an unrecognised value becomes `WARN` (note 1). |
 | <a id="opt-statsintervalmillis"></a>`statsIntervalMillis` | long | `0` (off) | all | When greater than 0, log a one-line stats snapshot at INFO this often (note 2). |
 
-1. `diagnosticsLevel`: the messages go to Log4j2's StatusLogger, never back through this
-   appender, so an outage cannot loop. It accepts any Log4j2 level name, case-insensitive (`OFF`,
+1. `diagnosticsLevel`: minimum level of the copy written to Log4j2's StatusLogger (the console).
+   It does not gate the copy logged through the diagnostics logger; see
+   [Turning the messages on and off with logger levels](#turning-the-messages-on-and-off-with-logger-levels). It accepts any Log4j2 level name, case-insensitive (`OFF`,
    `FATAL`, `ERROR`, `WARN`, `INFO`, `DEBUG`, `TRACE`, `ALL`). Messages are prefixed `batch-http[<sink>]`, except the two TLS warnings,
    which start with `TLS ... DISABLED`. What each level shows is listed under
    [What each diagnostics level shows](#what-each-diagnostics-level-shows).
 2. `statsIntervalMillis`: a daemon thread logs the snapshot, plus a final one at shutdown; `0` or
-   negative turns it off. It shows only with `diagnosticsLevel` `INFO` or finer and
-   `<Configuration status="INFO">` or finer. It lets you see delivery is healthy without looking at the spill directory.
+   negative turns it off. It is an INFO message: on the console it shows only with
+   `diagnosticsLevel` `INFO` or finer and `<Configuration status="INFO">` or finer, and in your
+   log appenders only when the diagnostics logger is at `INFO` or finer. It lets you see delivery is healthy without looking at the spill directory.
    The line is `batch-http[<sink>] stats accepted= sentRecords= sentBatches= dropped=
    failedBatches= queueDepth=`, then `duplicatesSuppressed=` for Elasticsearch with
    [`deduplicate`](#opt-deduplicate) on, plus `spill{onDiskBytes= segments= spilledRecords=
@@ -662,8 +665,48 @@ So, by setting:
 - `ERROR` hides the WARN lines.
 - `FATAL`/`OFF` hide everything.
 
-A message is printed only if `<Configuration status>` is also at that level or finer. The
-missing-credential startup error is gated only by `status`.
+On the console, a message is printed only if `<Configuration status>` is also at that level or
+finer. The missing-credential startup error is gated only by `status`.
+
+### Turning the messages on and off with logger levels
+
+Each message is also logged, at its own level, through the logger
+`com.mulesoft.support.batchhttp.diagnostics.<appender name>`. These are ordinary log events, so
+they reach the root logger's appenders: the application log, and on CloudHub 2.0 the Runtime
+Manager logs, which show the application's log events but not the console.
+
+No attribute is needed: you control the copy with logger levels like any other category, in
+`log4j2.xml` or through a platform's logging-level settings. On CloudHub 1.0, CloudHub 2.0 and
+Runtime Fabric that is the application's Logging settings in Runtime Manager; see
+[Setting the level on your platform](troubleshooting.md#setting-the-level-on-your-platform) for
+each platform's limits (CloudHub 2.0 accepts `DEBUG`, `INFO`, `WARN` and `ERROR`, not `OFF`, and
+applies a change by redeploying), and
+[Which level to choose](troubleshooting.md#which-level-to-choose-keeping-the-noise-down) for
+what each level shows.
+
+```xml
+<Loggers>
+    <!-- every <BatchHttp>: OFF, ERROR, WARN, INFO (+ heartbeat), DEBUG (+ retries) -->
+    <Logger name="com.mulesoft.support.batchhttp.diagnostics" level="INFO"/>
+    <!-- one appender, by its name="..." -->
+    <Logger name="com.mulesoft.support.batchhttp.diagnostics.elastic" level="DEBUG"/>
+    <Root level="INFO"> ... </Root>
+</Loggers>
+```
+
+- With no `<Logger>` declared, the level is inherited from the root logger, so with
+  `<Root level="INFO">` failures appear in the application log, and so does the heartbeat
+  once `statsIntervalMillis` is set.
+- `level="OFF"` stops the log copy; the console copy still follows `diagnosticsLevel`.
+- `diagnosticsLevel="OFF"` does the opposite: it stops the console copy only. Use it where
+  the console and the application log are the same stream, so each line appears once.
+
+No `<BatchHttp>` appender ships these events, neither its own nor another appender's, so an
+outage cannot loop even when the appender sits on the root logger. Messages raised before the
+appender has started (the startup credential failure, spill recovery, the TLS warnings) and
+after it has begun stopping (the shutdown drain lines, the final stats line) go to the console
+only; [How the diagnostics logger works](troubleshooting.md#how-the-diagnostics-logger-works)
+lists them.
 
 ## Vendor field mapping
 

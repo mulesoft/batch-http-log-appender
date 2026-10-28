@@ -183,8 +183,9 @@ one descriptive filter, whereas a blank `service` breaks every query keyed on th
 ```
 
 (Abridged — the real file also sets the spill and diagnostics attributes described below,
-and wires the framework noise-reduction loggers plus an `<AsyncRoot>`. `status="INFO"` is
-what lets the appender's own `StatusLogger` health lines and stats heartbeat print.)
+and wires the framework noise-reduction loggers plus an `<AsyncRoot>`. `status="INFO"` lets the appender's own health lines and stats heartbeat print on the
+console; the same lines also reach the log file through the
+`com.mulesoft.support.batchhttp.diagnostics` logger.)
 
 `maxBatchRecords="200"` is the library default, spelled out here so this file reads as a
 complete reference. So a burst of N events becomes roughly `ceil(N / 200)` POSTs (plus the

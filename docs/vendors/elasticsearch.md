@@ -278,7 +278,9 @@ Things to know about this sample:
 6. Check that the volume has room. If the JVM temp dir is memory-backed, point
    [`spillDirectory`](../configuration.md#opt-spilldirectory) at real storage
    ([Resilience](../resilience.md)).
-7. Combine it with `<Configuration status="INFO">` so the heartbeat prints.
+7. The heartbeat is logged through `com.mulesoft.support.batchhttp.diagnostics.<appender name>`
+   and so reaches the application log. `diagnosticsLevel` `INFO` with
+   `<Configuration status="INFO">` also prints it on the console.
 
 > [!WARNING]
 > The API key's `names` must cover your `index`, for example `logs-orders-*`. The key from
@@ -472,11 +474,15 @@ printf '%s\n' '{"create":{}}' \
 
 ### On the appender side
 
-Set [`statsIntervalMillis`](../configuration.md#opt-statsintervalmillis) with
+Set [`statsIntervalMillis`](../configuration.md#opt-statsintervalmillis) to get a heartbeat
+with `accepted`, `sentRecords`, `dropped`, `queueDepth` and the spill counters in the
+application log (and on the console with
 [`diagnosticsLevel`](../configuration.md#opt-diagnosticslevel) `INFO` and
-`<Configuration status="INFO">` to get a heartbeat with `accepted`, `sentRecords`, `dropped`,
-`queueDepth` and the spill counters. A non-zero `dropped` together with the "intake accepted the
-request but refused them" ERROR means Elasticsearch refused documents on mapping grounds.
+`<Configuration status="INFO">`; see
+[Where the messages go](../troubleshooting.md#where-the-messages-go)).
+
+A non-zero `dropped` together with the "intake accepted the request but refused them" ERROR
+means Elasticsearch refused documents on mapping grounds.
 
 ### Check for duplicates
 

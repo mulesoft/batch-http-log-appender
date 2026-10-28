@@ -1,6 +1,6 @@
 # Roadmap to production v1
 
-What a production v1 of batch-http-appender would add to the current proof-of-concept (0.2.0),
+What a production v1 of batch-http-appender would add to the current proof-of-concept (0.3.0),
 which is validated by unit + end-to-end tests (`mvn test`) and the
 [CloudHub benchmarks](benchmark-results.md).
 

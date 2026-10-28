@@ -24,7 +24,7 @@
 
     <groupId>com.mulesoft.support.batchhttp</groupId>
     <artifactId>batch-http-appender-parent</artifactId>
-    <version>0.2.2</version>
+    <version>0.3.0</version>
     <packaging>pom</packaging>
     <name>Batch HTTP Appender (parent)</name>
     <description>A batching HTTP log shipper for Datadog, Splunk HEC, New Relic, Dynatrace, Elasticsearch and any HTTP log intake.</description>
@@ -66,7 +66,7 @@
           on its container classloader, so a 3.x bump here would diverge from what actually
           runs and is excluded at runtime anyway.
         -->
-        <log4j.version>2.26.0</log4j.version>
+        <log4j.version>2.26.1</log4j.version>
         <junit.version>5.14.4</junit.version>
         <surefire.version>3.5.6</surefire.version>
         <compiler.plugin.version>3.16.0</compiler.plugin.version>
@@ -186,8 +186,8 @@
           whole reactor and FAILS the build on any dependency with a CVSS >= 7 (high/critical),
           so a vulnerable transitive cannot ship unnoticed. Kept in an opt-in profile because a
           full NVD scan is slow and needs network/an NVD API key; wire it into CI (nightly or
-          pre-release) rather than every local `mvn install`. Tune via -Dnvd.api.key=... and
-          -DfailBuildOnCVSS=...; suppress accepted findings with a dependency-check-suppressions.xml.
+          pre-release) rather than every local `mvn install`. Tune via -DfailBuildOnCVSS=...;
+          suppress accepted findings with a dependency-check-suppressions.xml.
         -->
         <profile>
             <id>security</id>
