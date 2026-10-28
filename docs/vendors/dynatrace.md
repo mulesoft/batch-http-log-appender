@@ -271,7 +271,7 @@ a short Dynatrace or network outage:
 | [`spillDirectory`](../configuration.md#opt-spilldirectory) | A disk that survives a restart, so a backlog is replayed after one (note 2) |
 | [`spillInstanceId`](../configuration.md#opt-spillinstanceid) | Stable across restarts of one instance; distinct between instances that share the directory |
 | [`maxTotalSpillBytes`](../configuration.md#opt-maxtotalspillbytes) | Bounds the backlog's disk use; size it to the outage you want to survive at your log rate |
-| [`diagnosticsLevel`](../configuration.md#opt-diagnosticslevel), [`statsIntervalMillis`](../configuration.md#opt-statsintervalmillis) | A one-line delivery heartbeat (accepted, sent, dropped, queue depth, spill) to the StatusLogger every minute |
+| [`diagnosticsLevel`](../configuration.md#opt-diagnosticslevel), [`statsIntervalMillis`](../configuration.md#opt-statsintervalmillis) | A one-line delivery heartbeat (accepted, sent, dropped, queue depth, spill) every minute, in the application log and, with `diagnosticsLevel` `INFO`, on the console |
 
 1. Backoff is capped by [`maxRetryBackoffMillis`](../configuration.md#opt-maxretrybackoffmillis),
    and a `Retry-After` header is honoured.
@@ -440,11 +440,16 @@ If the query doesn't finish within the request, the response has `"state":"RUNNI
 
 ### On the appender side
 
-Set [`diagnosticsLevel`](../configuration.md#opt-diagnosticslevel)`="INFO"` and
-[`statsIntervalMillis`](../configuration.md#opt-statsintervalmillis) to print the stats heartbeat
-(accepted, sentRecords, dropped, queueDepth, spill) to the StatusLogger. Keep
-`<Configuration status>` at `INFO` or `WARN`. If the DQL count falls short of `sentRecords` while
-nothing was dropped, look for `200` partial-ingest replies.
+Set [`statsIntervalMillis`](../configuration.md#opt-statsintervalmillis) to log the stats
+heartbeat (accepted, sentRecords, dropped, queueDepth, spill) through
+`com.mulesoft.support.batchhttp.diagnostics.<appender name>`; with the root logger at `INFO` it
+is in the application log. For the console copy add
+[`diagnosticsLevel`](../configuration.md#opt-diagnosticslevel)`="INFO"` and
+`<Configuration status="INFO">` (see
+[Where the messages go](../troubleshooting.md#where-the-messages-go)).
+
+If the DQL count falls short of `sentRecords` while nothing was dropped, look for `200`
+partial-ingest replies.
 
 ### Optional: parse `content` into attributes
 

@@ -34,9 +34,11 @@ import org.apache.logging.log4j.core.Layout;
 import org.apache.logging.log4j.core.LogEvent;
 import org.apache.logging.log4j.core.StringLayout;
 import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Configuration;
 import org.apache.logging.log4j.core.config.Property;
 import org.apache.logging.log4j.core.config.plugins.Plugin;
 import org.apache.logging.log4j.core.config.plugins.PluginAttribute;
+import org.apache.logging.log4j.core.config.plugins.PluginConfiguration;
 import org.apache.logging.log4j.core.config.plugins.PluginElement;
 import org.apache.logging.log4j.core.config.plugins.PluginFactory;
 
@@ -65,16 +67,30 @@ public final class BatchHttpAppender extends AbstractAppender {
 
     private final BatchingLogShipper shipper;
     private final boolean includeStackTrace;
+    /** Mirrors the engine's diagnostics to a named logger once the configuration has started. */
+    private final LoggerDiagnostics loggerDiagnostics;
 
     private BatchHttpAppender(String name, Filter filter, Layout<? extends Serializable> layout,
-                              boolean ignoreExceptions, BatchingLogShipper shipper, boolean includeStackTrace) {
+                              boolean ignoreExceptions, BatchingLogShipper shipper, boolean includeStackTrace,
+                              LoggerDiagnostics loggerDiagnostics) {
         super(name, filter, layout, ignoreExceptions, Property.EMPTY_ARRAY);
         this.shipper = shipper;
         this.includeStackTrace = includeStackTrace;
+        this.loggerDiagnostics = loggerDiagnostics;
+    }
+
+    @Override
+    public void start() {
+        super.start();
+        loggerDiagnostics.live(true);
     }
 
     @Override
     public void append(LogEvent event) {
+        // Diagnostics of this or any other <BatchHttp> reach here when the appender sits on the
+        // root logger; shipping them would feed an outage back into the engine reporting it.
+        if (LoggerDiagnostics.isDiagnosticsLogger(event.getLoggerName())) return;
+
         // Layout (if any) renders the message; otherwise use the formatted message.
         // Strip only a trailing line separator a `%n` in the pattern would add — not a full
         // trim(), which would also eat meaningful leading/trailing spaces in the message.
@@ -131,6 +147,7 @@ public final class BatchHttpAppender extends AbstractAppender {
     @Override
     public boolean stop(long timeout, TimeUnit timeUnit) {
         setStopping();
+        loggerDiagnostics.live(false);
         boolean stopped = super.stop(timeout, timeUnit, false);
         shipper.close(); // drains and flushes remaining events; spills (or counts) what misses the drain budget
         setStopped();
@@ -146,6 +163,7 @@ public final class BatchHttpAppender extends AbstractAppender {
     @PluginFactory
     public static BatchHttpAppender createAppender(
             @PluginAttribute("name") String name,
+            @PluginConfiguration Configuration configuration,
             @PluginElement("Layout") Layout<? extends Serializable> layout,
             @PluginElement("Filter") Filter filter,
             @PluginAttribute(value = "ignoreExceptions", defaultBoolean = true) boolean ignoreExceptions,
@@ -208,9 +226,10 @@ public final class BatchHttpAppender extends AbstractAppender {
             @PluginAttribute(value = "spillStartupReconcile", defaultBoolean = true) boolean spillStartupReconcile,
             @PluginAttribute(value = "spillFormat", defaultString = "BINARY") String spillFormat,
             // --- diagnostics (self-observability) ---
-            // Threshold for the appender's OWN health messages, written to Log4j2's StatusLogger
-            // (NOT back through this appender): WARN (default) surfaces drops/overflow/fatal
-            // rejections; INFO/DEBUG add the stats heartbeat and per-attempt retry chatter.
+            // Threshold for the StatusLogger copy of the appender's OWN health messages (NOT back
+            // through this appender): WARN (default) surfaces drops/overflow/fatal rejections;
+            // INFO/DEBUG add the stats heartbeat and per-attempt retry chatter. The copy logged
+            // through com.mulesoft.support.batchhttp.diagnostics.<name> follows that logger's level.
             @PluginAttribute(value = "diagnosticsLevel", defaultString = "WARN") String diagnosticsLevel,
             // When > 0, log a one-line stats snapshot to the StatusLogger this often (a delivery
             // heartbeat). 0 (default) disables it. Requires diagnosticsLevel INFO or finer to show.
@@ -238,6 +257,10 @@ public final class BatchHttpAppender extends AbstractAppender {
                     name, v, e.getMessage(), v, requiredAttributes(v), e);
             return null;
         }
+
+        StatusLoggerDiagnostics statusDiagnostics = new StatusLoggerDiagnostics(
+                org.apache.logging.log4j.Level.toLevel(diagnosticsLevel, org.apache.logging.log4j.Level.WARN));
+        LoggerDiagnostics diagnostics = new LoggerDiagnostics(statusDiagnostics, configuration, name);
 
         BatchConfig config = BatchConfig.builder()
                 .maxBatchRecords(maxBatchRecords)
@@ -272,14 +295,15 @@ public final class BatchHttpAppender extends AbstractAppender {
                 .spillStartupReconcile(spillStartupReconcile)
                 .spillFormat(parseEnum(BatchConfig.SpillFormat.class, spillFormat, BatchConfig.SpillFormat.BINARY))
                 // Route the engine's own diagnostics to Log4j2's StatusLogger (recursion-safe —
-                // never flows back through this appender), gated at the configured level.
-                .diagnostics(new StatusLoggerDiagnostics(
-                        org.apache.logging.log4j.Level.toLevel(diagnosticsLevel, org.apache.logging.log4j.Level.WARN)))
+                // never flows back through this appender), gated at the configured level, and to
+                // the diagnostics logger, gated by its own level.
+                .diagnostics(diagnostics)
                 .statsInterval(statsIntervalMillis > 0 ? Duration.ofMillis(statsIntervalMillis) : Duration.ZERO)
                 .build();
 
         BatchingLogShipper shipper = new BatchingLogShipper(sink, config);
-        return new BatchHttpAppender(name, filter, layout, ignoreExceptions, shipper, includeStackTrace);
+        return new BatchHttpAppender(name, filter, layout, ignoreExceptions, shipper, includeStackTrace,
+                diagnostics);
     }
 
     /**

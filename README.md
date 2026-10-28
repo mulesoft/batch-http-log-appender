@@ -2,7 +2,7 @@
 
 A **batching HTTP log shipper** for Java: a fast, drop-in replacement for Log4j2's stock
 `HttpAppender`, which sends one synchronous HTTP request per log event. Current release:
-**0.2.2** ([CHANGELOG](CHANGELOG.md)).
+**0.3.0** ([CHANGELOG](CHANGELOG.md)).
 
 On this page: [Why](#why) · [Supported vendors](#supported-vendors) · [Quick start](#quick-start) ·
 [Benchmarks](#benchmarks) · [Documentation](#documentation) · [Project](#project)
@@ -72,7 +72,7 @@ CH1 and CH2 run at different concurrency, so compare within a column, never CH1 
    <dependency>
        <groupId>com.mulesoft.support.batchhttp</groupId>
        <artifactId>batch-http-log4j2</artifactId>
-       <version>0.2.2</version>
+       <version>0.3.0</version>
    </dependency>
    ```
 
@@ -151,7 +151,7 @@ covers.
 
 ## Project
 
-**Status:** proof-of-concept (0.2.2), validated by unit + end-to-end tests (`mvn test`) and the
+**Status:** proof-of-concept (0.3.0), validated by unit + end-to-end tests (`mvn test`) and the
 benchmarks above. The [roadmap](docs/roadmap.md) lists what a production v1 would add; release
 history is in the [CHANGELOG](CHANGELOG.md).
 
@@ -161,8 +161,11 @@ history is in the [CHANGELOG](CHANGELOG.md).
   directly; see [CONTRIBUTING.md](CONTRIBUTING.md).
 - **Security:** report vulnerabilities as described in [SECURITY.md](SECURITY.md), via
   Salesforce's responsible disclosure process, not as a public GitHub issue.
-- **License:** Apache License, Version 2.0 ([LICENSE.txt](LICENSE.txt)). Every Salesforce-authored
-  source and configuration file carries the `SPDX-License-Identifier: Apache-2.0` header.
+- **License:** Apache License, Version 2.0 ([LICENSE.txt](LICENSE.txt)). Every source and
+  configuration file of the library carries the `SPDX-License-Identifier: Apache-2.0` header; the
+  samples under `demo/` are exempt from the header. The license covers the files in this
+  repository only. The Mule demos run on the Mule runtime and use MuleSoft connectors, which are
+  not part of this repository and are licensed separately by MuleSoft.
 - **Code of Conduct:** participation is governed by the Salesforce Open Source
   [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 - **Author:** created and maintained by Vitalii Mykytenko, Senior Principal Technical Support

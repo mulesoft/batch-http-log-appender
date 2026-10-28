@@ -5,6 +5,55 @@ All notable changes to the Batch HTTP Log Appender are recorded here. The format
 [Semantic Versioning](https://semver.org/). Defaults that moved between releases are listed in
 [docs/configuration.md](docs/configuration.md#defaults-that-changed).
 
+## [0.3.0] — 2026-10-28
+
+The appender's own health messages (drops, rejections, queue overflow, the stats heartbeat)
+now appear in the application log, including on platforms that don't show the console, such as
+CloudHub 2.0. Their level is set like any other logger's: in `log4j2.xml` or in Runtime
+Manager's logging settings. Upgrading needs no configuration change, but read the first
+**Changed** item: with the root logger at `INFO`, these lines now reach every appender on root.
+
+### Added
+- **Diagnostics logger.** Every message the appender writes to Log4j2's `StatusLogger` is also
+  logged through `com.mulesoft.support.batchhttp.diagnostics.<appender name>`, at the same
+  level. It reaches the root logger's appenders: the application log, a file appender and, on
+  CloudHub 2.0, the Runtime Manager logs. Set the level on the parent name for every appender
+  or on `.<appender name>` for one; on CloudHub 2.0 through **Settings → Logging** or
+  `anypoint-cli-v4 runtime-mgr application modify --scopeLoggingConfig`. Verified on CloudHub
+  2.0 at `ERROR`, `WARN`, `INFO` and `DEBUG`, and through an endpoint outage with spill and
+  replay (every record delivered, no diagnostic shipped).
+- **No feedback loop.** Every `<BatchHttp>` appender discards events from that logger and its
+  children, so a failing intake never ships its own error messages, even with the appender on
+  the root logger next to other `<BatchHttp>` appenders. Tested with all six vendors
+  (`datadog`, `splunk`, `newrelic`, `dynatrace`, `elasticsearch`, `generic`) on one root logger.
+- `docs/troubleshooting.md`: where each copy goes, how to set the level on CloudHub 1.0,
+  CloudHub 2.0, Runtime Fabric and in `log4j2.xml`, how the logger is looked up, which
+  messages stay console-only, what each level shows, and which level keeps the noise down.
+
+### Changed
+- **More lines in the application log by default.** The logger inherits the root level, so
+  with `<Root level="INFO">` failures and, where `statsIntervalMillis` is set, the heartbeat now
+  appear in the application log as well as on the console. To keep the previous behaviour,
+  declare `<Logger name="com.mulesoft.support.batchhttp.diagnostics" level="OFF"/>` (on CloudHub
+  2.0, where Runtime Manager offers no `OFF`, use `ERROR`).
+- `diagnosticsLevel` now gates the console copy only; the log copy follows the logger level.
+  Set `diagnosticsLevel="OFF"` where the console and the application log are the same stream,
+  so each line appears once.
+- Messages raised before the appender starts (startup credential failure, spill recovery, the
+  TLS warnings) and after it begins stopping (shutdown drain lines, final stats) still go to the
+  console only.
+- The four batch Mule demos build against `0.3.0`; their `log4j2.xml` comments and the vendor
+  pages describe both copies.
+
+### Fixed
+- log4j bumped from `2.26.0` to `2.26.1`, which fixes
+  [CVE-2026-49844](https://nvd.nist.gov/vuln/detail/CVE-2026-49844) (CVSS 5.9: invalid JSON
+  from `MapMessage` with a NaN or infinite value). Releases up to `0.2.2` pinned `2.26.0`. The
+  appender itself does not use `MapMessage`, and in a Mule application log4j comes from the
+  Mule runtime, whose patch releases carry the fix. The version matters for standalone Java
+  applications that take log4j from this dependency. `mvn -Psecurity verify` now reports no
+  known vulnerability.
+
 ## [0.2.2] — 2026-10-19
 
 Elasticsearch now stores each record once, even when a batch is sent again. Upgrading from 0.2.1
@@ -277,6 +326,7 @@ No appender code changed.
 - Initial release: the batching Log4j2 appender (`<BatchHttp>`) on a vendor-neutral core
   engine. Pre-publication history lives in the development repository.
 
+[0.3.0]: https://github.com/mulesoft/batch-http-log-appender/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/mulesoft/batch-http-log-appender/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/mulesoft/batch-http-log-appender/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/mulesoft/batch-http-log-appender/compare/v0.1.5...v0.2.0

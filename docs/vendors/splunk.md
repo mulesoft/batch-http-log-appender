@@ -196,10 +196,10 @@ example below changes a few of them on purpose:
 - [`spillInstanceId`](../configuration.md#opt-spillinstanceid) is a stable id per running
   instance. A restart on the same host adopts its own backlog, and two apps sharing a spill
   directory never touch each other's files.
-- [`diagnosticsLevel`](../configuration.md#opt-diagnosticslevel) `INFO` together with
-  [`statsIntervalMillis`](../configuration.md#opt-statsintervalmillis) `60000` prints a
-  once-a-minute delivery heartbeat, so you can check that logs are still flowing by reading a log
-  line. With spill on, watch `spilledRecords` in it: that counter, not `dropped`, shows overload.
+- [`statsIntervalMillis`](../configuration.md#opt-statsintervalmillis) `60000` logs a
+  once-a-minute delivery heartbeat to the application log, so you can check that logs are
+  still flowing by reading a log line. With spill on, watch `spilledRecords` in it: that
+  counter, not `dropped`, shows overload.
 
 See [Resilience and the disk-spill buffer](../resilience.md) for how spill, replay and crash
 recovery behave.
@@ -356,10 +356,11 @@ produce duplicate events in Splunk.
 
 ## Verify delivery
 
-1. **In the app.** Set [`statsIntervalMillis`](../configuration.md#opt-statsintervalmillis) with
-   [`diagnosticsLevel`](../configuration.md#opt-diagnosticslevel) `INFO`, and watch
-   `sentRecords` climb in the `batch-http[SplunkHEC] stats ...` heartbeat. It goes to Log4j2's
-   StatusLogger, so make sure `<Configuration status>` is not `OFF`.
+1. **In the app.** Set [`statsIntervalMillis`](../configuration.md#opt-statsintervalmillis) and
+   watch `sentRecords` climb in the `batch-http[SplunkHEC] stats ...` heartbeat. It is logged
+   through `com.mulesoft.support.batchhttp.diagnostics.<appender name>`, so it is in the
+   application log while the root logger is at `INFO`; for the console copy see
+   [Where the messages go](../troubleshooting.md#where-the-messages-go).
 2. **In Splunk.** Open **Search & Reporting** and search your index and sourcetype. `spath`
    extracts the JSON event fields in case your sourcetype does not extract JSON automatically:
 

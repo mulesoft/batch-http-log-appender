@@ -15,7 +15,7 @@ impact of batching — is [`dynatrace-stock-http`](../dynatrace-stock-http).
 
 ```text
 dynatrace-batch-http/
-├── pom.xml                          mule-application packaging; depends on batch-http-log4j2 0.2.2
+├── pom.xml                          mule-application packaging; depends on batch-http-log4j2 0.3.0
 ├── mule-artifact.json               minMuleVersion 4.9.15
 └── src/main/
     ├── mule/app.xml                 HTTP-triggered flows that emit log events (port 8087)

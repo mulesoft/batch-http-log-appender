@@ -241,11 +241,13 @@ Datadog-specific reason. Use this `<BatchHttp>` in place of the one in the
   On hosts that may come back with an old spill directory, consider
   [`spillRecoveryMode`](../configuration.md#opt-spillrecoverymode) `DELETE` or `IGNORE` (see
   [Resilience](../resilience.md)).
-- Heartbeat: with `status="WARN"` as shown you see failures only. For a once-a-minute heartbeat,
-  so "is it still shipping?" is answered by a log line, opt in with
+- Heartbeat: for a once-a-minute line that answers "is it still shipping?", set
+  [`statsIntervalMillis`](../configuration.md#opt-statsintervalmillis) `60000`. It is logged at
+  INFO through `com.mulesoft.support.batchhttp.diagnostics.<appender name>`, so with the root
+  logger at `INFO` it appears in the application log. To also print it on the console, set
   [`diagnosticsLevel`](../configuration.md#opt-diagnosticslevel) `INFO` and
-  [`statsIntervalMillis`](../configuration.md#opt-statsintervalmillis) `60000`, and also set
-  `<Configuration status="INFO">`. The heartbeat prints only when both allow INFO.
+  `<Configuration status="INFO">`; see
+  [Where the messages go](../troubleshooting.md#where-the-messages-go).
 
 ### Options with a Datadog-specific meaning
 
@@ -405,11 +407,11 @@ an event and compare `generatedAt` with the Datadog timestamp (with `includeTime
 
 ### From the app
 
-Set [`statsIntervalMillis`](../configuration.md#opt-statsintervalmillis) with
-[`diagnosticsLevel`](../configuration.md#opt-diagnosticslevel) `INFO` (and
-`<Configuration status="INFO">`), then watch `sentRecords` climb in the heartbeat lines prefixed
-`batch-http[Datadog]`. Under load, an empty `${java.io.tmpdir}/batch-http-spill/Datadog/` is the
-healthy state.
+Set [`statsIntervalMillis`](../configuration.md#opt-statsintervalmillis), then watch
+`sentRecords` climb in the heartbeat lines prefixed `batch-http[Datadog]`. They are logged
+through `com.mulesoft.support.batchhttp.diagnostics.<appender name>`; see
+[Where the messages go](../troubleshooting.md#where-the-messages-go). Under load, an empty
+`${java.io.tmpdir}/batch-http-spill/Datadog/` is the healthy state.
 
 ### With the demo
 

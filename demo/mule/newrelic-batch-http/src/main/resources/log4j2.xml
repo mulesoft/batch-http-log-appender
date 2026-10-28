@@ -19,9 +19,13 @@
   element is recognized inside the Mule app classloader.
 
   status="INFO": the <BatchHttp> appender reports its OWN health (dropped batches, HTTP
-  status of failures, queue overflow) and an optional stats heartbeat to Log4j2's
-  StatusLogger — this `status` level is the floor that lets those lines (and the INFO
-  heartbeat) actually print to the runtime console. Drop to "WARN" to keep only failures.
+  status of failures, queue overflow) and an optional stats heartbeat twice. One copy goes to
+  Log4j2's StatusLogger, and this `status` level is the floor that lets it (and the INFO
+  heartbeat) print to the runtime console; drop to "WARN" to keep only failures there. The
+  other copy is logged through com.mulesoft.support.batchhttp.diagnostics.<appender name>,
+  which inherits the root logger's INFO, so it lands in the root's appenders: the FILE log
+  here, and on CloudHub 2.0 the Runtime Manager logs. Set that logger's level in Runtime
+  Manager or below to change it; no <BatchHttp> appender ever ships these lines.
 -->
 <Configuration status="INFO" packages="com.mulesoft.support.batchhttp.log4j2">
 
@@ -182,7 +186,8 @@
                                       past it, records are dropped rather than parked on disk. -->
             <!-- Diagnostics knobs above:
                    diagnosticsLevel    floor for the appender's OWN health messages, written to
-                                       Log4j2's StatusLogger (out-of-band, never re-shipped):
+                                       Log4j2's StatusLogger (the console). The copy in the
+                                       log follows the diagnostics logger's level instead:
                                        WARN (default) = only failures (dropped/rejected batches,
                                        queue overflow); INFO = also the periodic stats heartbeat.
                                        Capped by the <Configuration status="..."> level above.
